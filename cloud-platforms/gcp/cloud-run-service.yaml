@@ -1,0 +1,240 @@
+# Google Cloud Run service configuration
+# Fully managed serverless containers with auto-scaling to zero
+# Docs: https://cloud.google.com/run/docs/reference/rest/v2/projects.locations.services
+#
+# Deploy:
+#   gcloud run services replace cloud-run-service.yaml --region us-central1
+# Or:
+#   gcloud run deploy myapp-api \
+#     --image gcr.io/my-gcp-project/myapp-api:latest \
+#     --region us-central1 \
+#     --platform managed
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: myapp-api
+  namespace: my-gcp-project
+  labels:
+    cloud.googleapis.com/location: us-central1
+    environment: production
+    app: myapp-api
+  annotations:
+    run.googleapis.com/ingress: all              # all | internal | internal-and-cloud-load-balancing
+    run.googleapis.com/ingress-status: all
+    run.googleapis.com/launch-stage: GA
+
+spec:
+  template:
+    metadata:
+      annotations:
+        # ---------------------------------------------------------------------------
+        # Scaling
+        # ---------------------------------------------------------------------------
+        autoscaling.knative.dev/minScale: "2"        # keep 2 instances warm (no cold starts)
+        autoscaling.knative.dev/maxScale: "100"       # max instances
+        run.googleapis.com/startup-cpu-boost: "true"  # extra CPU during cold start
+
+        # ---------------------------------------------------------------------------
+        # Execution environment
+        # ---------------------------------------------------------------------------
+        run.googleapis.com/execution-environment: gen2    # gen1 | gen2 (gen2 = better perf)
+
+        # ---------------------------------------------------------------------------
+        # VPC connector (for Cloud SQL, Redis, private resources)
+        # ---------------------------------------------------------------------------
+        run.googleapis.com/vpc-access-connector: projects/my-gcp-project/locations/us-central1/connectors/myapp-vpc-connector
+        run.googleapis.com/vpc-access-egress: private-ranges-only   # all-traffic | private-ranges-only
+
+        # ---------------------------------------------------------------------------
+        # Cloud SQL connection
+        # ---------------------------------------------------------------------------
+        run.googleapis.com/cloudsql-instances: my-gcp-project:us-central1:myapp-postgres
+
+        # ---------------------------------------------------------------------------
+        # Session affinity (for stateful connections)
+        # ---------------------------------------------------------------------------
+        run.googleapis.com/sessionAffinity: "false"
+
+      labels:
+        app: myapp-api
+        environment: production
+        version: "1.0"
+
+    spec:
+      # Service account with least-privilege IAM
+      serviceAccountName: myapp-api-sa@my-gcp-project.iam.gserviceaccount.com
+
+      # Request timeout (max 3600s for Cloud Run)
+      timeoutSeconds: 30
+
+      # Max concurrent requests per instance (tune based on workload)
+      containerConcurrency: 80
+
+      containers:
+        - name: myapp-api
+          image: gcr.io/my-gcp-project/myapp-api:latest
+          # Or use Artifact Registry:
+          # image: us-central1-docker.pkg.dev/my-gcp-project/myapp/api:latest
+
+          ports:
+            - name: http1
+              containerPort: 8080
+              protocol: TCP
+
+          resources:
+            limits:
+              cpu: "2"
+              memory: 1Gi
+            requests:
+              cpu: "1"
+              memory: 512Mi
+
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "8080"
+            - name: LOG_LEVEL
+              value: info
+            - name: GOOGLE_CLOUD_PROJECT
+              value: my-gcp-project
+
+            # Secrets via Secret Manager (recommended over plain env vars)
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: myapp-database-url
+                  key: latest
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: myapp-redis-url
+                  key: latest
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: myapp-jwt-secret
+                  key: latest
+
+          # Volume mounts for secrets as files
+          volumeMounts:
+            - name: service-account-key
+              mountPath: /secrets/service-account
+              readOnly: true
+
+          # Liveness probe (Cloud Run gen2 only)
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          # Startup probe (gen2 only)
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+            timeoutSeconds: 3
+
+      volumes:
+        - name: service-account-key
+          secret:
+            secretName: myapp-service-account-key
+            items:
+              - key: latest
+                path: key.json
+
+  traffic:
+    # 100% to latest revision
+    - percent: 100
+      latestRevision: true
+    # Canary deployment example (uncomment to split traffic):
+    # - revisionName: myapp-api-v2
+    #   percent: 10
+    #   tag: canary
+    # - revisionName: myapp-api-v1
+    #   percent: 90
+    #   tag: stable
+
+---
+# ---------------------------------------------------------------------------
+# IAM policy — allow unauthenticated invocations (public API)
+# Apply separately:
+#   gcloud run services add-iam-policy-binding myapp-api \
+#     --region us-central1 \
+#     --member allUsers \
+#     --role roles/run.invoker
+# ---------------------------------------------------------------------------
+
+---
+# ---------------------------------------------------------------------------
+# Cloud Run Job — for batch processing / migrations
+# ---------------------------------------------------------------------------
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: myapp-db-migrate
+  namespace: my-gcp-project
+  labels:
+    cloud.googleapis.com/location: us-central1
+    app: myapp-api
+    job-type: db-migration
+  annotations:
+    run.googleapis.com/launch-stage: GA
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/vpc-access-connector: projects/my-gcp-project/locations/us-central1/connectors/myapp-vpc-connector
+        run.googleapis.com/vpc-access-egress: private-ranges-only
+        run.googleapis.com/cloudsql-instances: my-gcp-project:us-central1:myapp-postgres
+    spec:
+      taskCount: 1
+      parallelism: 1
+      maxRetries: 1
+      timeoutSeconds: 600
+      template:
+        spec:
+          serviceAccountName: myapp-api-sa@my-gcp-project.iam.gserviceaccount.com
+          containers:
+            - name: migrate
+              image: gcr.io/my-gcp-project/myapp-api:latest
+              command: ["node", "dist/scripts/migrate.js"]
+              resources:
+                limits:
+                  cpu: "1"
+                  memory: 512Mi
+              env:
+                - name: NODE_ENV
+                  value: production
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: myapp-database-url
+                      key: latest
+
+# ---------------------------------------------------------------------------
+# Reference gcloud commands
+# ---------------------------------------------------------------------------
+# Deploy:
+#   gcloud run services replace cloud-run-service.yaml --region us-central1
+#
+# View logs:
+#   gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=myapp-api" \
+#     --limit 50 --format json
+#
+# Traffic split:
+#   gcloud run services update-traffic myapp-api \
+#     --to-revisions myapp-api-v2=10,myapp-api-v1=90 \
+#     --region us-central1
+#
+# Run migration job:
+#   gcloud run jobs execute myapp-db-migrate --region us-central1 --wait

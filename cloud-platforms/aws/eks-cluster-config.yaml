@@ -1,0 +1,255 @@
+# eksctl ClusterConfig — production-grade EKS cluster
+# Docs: https://eksctl.io/usage/schema/
+#
+# Create:  eksctl create cluster -f eks-cluster-config.yaml
+# Delete:  eksctl delete cluster -f eks-cluster-config.yaml
+# Upgrade: eksctl upgrade cluster -f eks-cluster-config.yaml
+
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: myapp-production
+  region: us-east-1
+  version: "1.29"
+  tags:
+    environment: production
+    team: platform
+    cost-center: engineering
+    managed-by: eksctl
+
+# ---------------------------------------------------------------------------
+# VPC — dedicated VPC with public + private subnets across 3 AZs
+# ---------------------------------------------------------------------------
+vpc:
+  cidr: 10.0.0.0/16
+  clusterEndpoints:
+    publicAccess: true
+    privateAccess: true
+  publicAccessCIDRs:
+    - 0.0.0.0/0               # restrict to office/VPN CIDRs in production
+  nat:
+    gateway: HighlyAvailable   # one NAT GW per AZ
+
+# ---------------------------------------------------------------------------
+# IAM — OIDC provider for IRSA
+# ---------------------------------------------------------------------------
+iam:
+  withOIDC: true
+  serviceAccounts:
+    - metadata:
+        name: aws-load-balancer-controller
+        namespace: kube-system
+      wellKnownPolicies:
+        awsLoadBalancerController: true
+    - metadata:
+        name: cluster-autoscaler
+        namespace: kube-system
+      wellKnownPolicies:
+        autoScaler: true
+    - metadata:
+        name: ebs-csi-controller-sa
+        namespace: kube-system
+      wellKnownPolicies:
+        ebsCSIController: true
+    - metadata:
+        name: efs-csi-controller-sa
+        namespace: kube-system
+      wellKnownPolicies:
+        efsCSIController: true
+    - metadata:
+        name: external-dns
+        namespace: kube-system
+      wellKnownPolicies:
+        externalDNS: true
+    - metadata:
+        name: velero
+        namespace: velero
+      attachPolicyARNs:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+    - metadata:
+        name: cert-manager
+        namespace: cert-manager
+      wellKnownPolicies:
+        certManager: true
+
+# ---------------------------------------------------------------------------
+# Managed node groups
+# ---------------------------------------------------------------------------
+managedNodeGroups:
+  # System nodes: core cluster components (coredns, metrics-server, etc.)
+  - name: system-nodes
+    instanceType: m6i.large
+    minSize: 2
+    maxSize: 4
+    desiredCapacity: 2
+    volumeSize: 100
+    volumeType: gp3
+    volumeEncrypted: true
+    amiFamily: AmazonLinux2
+    availabilityZones:
+      - us-east-1a
+      - us-east-1b
+      - us-east-1c
+    labels:
+      role: system
+      node-class: system
+    taints:
+      - key: CriticalAddonsOnly
+        value: "true"
+        effect: NoSchedule
+    tags:
+      k8s.io/cluster-autoscaler/enabled: "true"
+      k8s.io/cluster-autoscaler/myapp-production: owned
+      node-group: system
+    iam:
+      withAddonPolicies:
+        cloudWatch: true
+        autoScaler: true
+    updateConfig:
+      maxUnavailable: 1
+    ssh:
+      allow: false
+
+  # Application nodes: stateless workloads
+  - name: app-nodes
+    instanceType: m6i.xlarge
+    minSize: 2
+    maxSize: 20
+    desiredCapacity: 4
+    volumeSize: 100
+    volumeType: gp3
+    volumeEncrypted: true
+    amiFamily: AmazonLinux2
+    availabilityZones:
+      - us-east-1a
+      - us-east-1b
+      - us-east-1c
+    labels:
+      role: application
+      node-class: app
+    tags:
+      k8s.io/cluster-autoscaler/enabled: "true"
+      k8s.io/cluster-autoscaler/myapp-production: owned
+      node-group: application
+    iam:
+      withAddonPolicies:
+        cloudWatch: true
+        autoScaler: true
+        albIngress: true
+    updateConfig:
+      maxUnavailable: 2
+    ssh:
+      allow: false
+
+  # Database nodes: stateful workloads with local NVMe (c6id/r6id)
+  - name: db-nodes
+    instanceType: r6id.2xlarge
+    minSize: 1
+    maxSize: 6
+    desiredCapacity: 2
+    volumeSize: 200
+    volumeType: gp3
+    volumeEncrypted: true
+    amiFamily: AmazonLinux2
+    availabilityZones:
+      - us-east-1a
+      - us-east-1b
+    labels:
+      role: database
+      node-class: db
+    taints:
+      - key: workload
+        value: database
+        effect: NoSchedule
+    tags:
+      k8s.io/cluster-autoscaler/enabled: "true"
+      k8s.io/cluster-autoscaler/myapp-production: owned
+      node-group: database
+    iam:
+      withAddonPolicies:
+        cloudWatch: true
+        autoScaler: true
+        ebs: true
+    updateConfig:
+      maxUnavailable: 1
+    ssh:
+      allow: false
+
+  # Spot nodes: batch / non-critical workloads
+  - name: spot-nodes
+    instanceTypes:
+      - m6i.2xlarge
+      - m5.2xlarge
+      - m5n.2xlarge
+      - m6a.2xlarge
+    spot: true
+    minSize: 0
+    maxSize: 30
+    desiredCapacity: 0
+    volumeSize: 100
+    volumeType: gp3
+    volumeEncrypted: true
+    amiFamily: AmazonLinux2
+    labels:
+      role: spot
+      node-class: spot
+    taints:
+      - key: spot
+        value: "true"
+        effect: NoSchedule
+    tags:
+      k8s.io/cluster-autoscaler/enabled: "true"
+      k8s.io/cluster-autoscaler/myapp-production: owned
+      node-group: spot
+    iam:
+      withAddonPolicies:
+        cloudWatch: true
+        autoScaler: true
+    ssh:
+      allow: false
+
+# ---------------------------------------------------------------------------
+# Cluster add-ons (managed by EKS)
+# ---------------------------------------------------------------------------
+addons:
+  - name: vpc-cni
+    version: latest
+    attachPolicyARNs:
+      - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+    configurationValues: |-
+      enableNetworkPolicy: "true"
+  - name: coredns
+    version: latest
+  - name: kube-proxy
+    version: latest
+  - name: aws-ebs-csi-driver
+    version: latest
+    wellKnownPolicies:
+      ebsCSIController: true
+  - name: aws-efs-csi-driver
+    version: latest
+    wellKnownPolicies:
+      efsCSIController: true
+
+# ---------------------------------------------------------------------------
+# CloudWatch logging
+# ---------------------------------------------------------------------------
+cloudWatch:
+  clusterLogging:
+    enableTypes:
+      - api
+      - audit
+      - authenticator
+      - controllerManager
+      - scheduler
+    logRetentionInDays: 90
+
+# ---------------------------------------------------------------------------
+# Karpenter (alternative autoscaler — comment out if using cluster-autoscaler)
+# ---------------------------------------------------------------------------
+# karpenter:
+#   version: "0.35.0"
+#   createServiceAccount: true
+#   defaultInstanceProfile: KarpenterNodeInstanceProfile-myapp-production
+#   withSpotInterruptionQueue: true

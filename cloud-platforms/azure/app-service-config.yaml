@@ -1,0 +1,323 @@
+# Azure App Service configuration
+# Covers: App Service Plan, Web App, deployment slots, autoscale, custom domains
+# Docs: https://learn.microsoft.com/en-us/azure/app-service/
+#
+# Deploy via Azure CLI:
+#   az appservice plan create --name myapp-plan --resource-group myapp-rg \
+#     --sku P3v3 --is-linux --location eastus
+#   az webapp create --name myapp-api --resource-group myapp-rg \
+#     --plan myapp-plan --runtime "NODE:20-lts"
+
+# ---------------------------------------------------------------------------
+# App Service Plan (PremiumV3 — best price/performance for production)
+# ---------------------------------------------------------------------------
+appServicePlan:
+  name: myapp-plan
+  resourceGroup: myapp-rg
+  location: eastus
+  sku:
+    name: P3v3                    # P1v3 | P2v3 | P3v3 | P1mv3 | P2mv3 | P3mv3
+    tier: PremiumV3
+    size: P3v3
+    family: Pv3
+    capacity: 2                   # instance count (before autoscale)
+  kind: linux
+  reserved: true                  # true = Linux
+  zoneRedundant: true             # spread instances across AZs (requires >=3 instances)
+  tags:
+    environment: production
+    managed-by: azure-cli
+
+# ---------------------------------------------------------------------------
+# Web App (Node.js API)
+# ---------------------------------------------------------------------------
+webApp:
+  name: myapp-api
+  resourceGroup: myapp-rg
+  location: eastus
+  serverFarmId: /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myapp-rg/providers/Microsoft.Web/serverfarms/myapp-plan
+  kind: app,linux
+  httpsOnly: true
+
+  siteConfig:
+    linuxFxVersion: "NODE|20-lts"  # runtime stack
+    alwaysOn: true
+    http20Enabled: true
+    ftpsState: Disabled
+    minTlsVersion: "1.2"
+    scmMinTlsVersion: "1.2"
+    webSocketsEnabled: false
+    use32BitWorkerProcess: false
+    remoteDebuggingEnabled: false
+
+    # Health check
+    healthCheckPath: /healthz
+
+    # Number of pre-warmed instances (reduces cold starts)
+    preWarmedInstanceCount: 1
+
+    # Auto-heal on memory/request threshold
+    autoHealEnabled: true
+    autoHealRules:
+      triggers:
+        privateBytesInKB: 1048576    # 1 GB
+        requests:
+          count: 500
+          timeInterval: "00:01:00"
+        statusCodes:
+          - status: 500
+            subStatus: 0
+            win32Status: 0
+            count: 20
+            timeInterval: "00:02:00"
+      actions:
+        actionType: Recycle
+        minProcessExecutionTime: "00:01:00"
+
+    # CORS
+    cors:
+      allowedOrigins:
+        - https://myapp.com
+        - https://www.myapp.com
+        - https://staging.myapp.com
+      supportCredentials: true
+
+    # IP security restrictions
+    ipSecurityRestrictions:
+      - ipAddress: Any
+        action: Allow
+        priority: 2147483647
+        name: Allow all
+        description: Allow all by default; tighten per environment
+
+    # Application settings (non-sensitive)
+    appSettings:
+      - name: NODE_ENV
+        value: production
+      - name: PORT
+        value: "8080"
+      - name: LOG_LEVEL
+        value: info
+      - name: WEBSITE_NODE_DEFAULT_VERSION
+        value: "~20"
+      - name: WEBSITE_RUN_FROM_PACKAGE
+        value: "1"
+      # Application Insights
+      - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+        value: "@Microsoft.KeyVault(SecretUri=https://myapp-kv.vault.azure.net/secrets/appinsights-connection-string/)"
+      - name: ApplicationInsightsAgent_EXTENSION_VERSION
+        value: "~3"
+      # Key Vault references for secrets
+      - name: DATABASE_URL
+        value: "@Microsoft.KeyVault(SecretUri=https://myapp-kv.vault.azure.net/secrets/database-url/)"
+      - name: REDIS_URL
+        value: "@Microsoft.KeyVault(SecretUri=https://myapp-kv.vault.azure.net/secrets/redis-url/)"
+      - name: JWT_SECRET
+        value: "@Microsoft.KeyVault(SecretUri=https://myapp-kv.vault.azure.net/secrets/jwt-secret/)"
+      # Deployment
+      - name: WEBSITES_ENABLE_APP_SERVICE_STORAGE
+        value: "false"
+      - name: WEBSITE_HTTPLOGGING_RETENTION_DAYS
+        value: "7"
+      # Container health
+      - name: WEBSITE_HEALTHCHECK_MAXPINGFAILURES
+        value: "10"
+
+    # Connection strings
+    connectionStrings:
+      - name: DefaultConnection
+        connectionString: "@Microsoft.KeyVault(SecretUri=https://myapp-kv.vault.azure.net/secrets/sql-connection-string/)"
+        type: SQLAzure
+
+  # Managed identity for Key Vault access
+  identity:
+    type: SystemAssigned
+
+  # Custom domain
+  hostNameBindings:
+    - hostName: api.myapp.com
+      sslState: SniEnabled
+      thumbprint: ""               # populate after uploading cert
+
+  # ---------------------------------------------------------------------------
+  # Deployment slots
+  # ---------------------------------------------------------------------------
+  slots:
+    - name: staging
+      siteConfig:
+        linuxFxVersion: "NODE|20-lts"
+        alwaysOn: true
+        http20Enabled: true
+        httpsOnly: true
+        appSettings:
+          - name: NODE_ENV
+            value: staging
+          - name: LOG_LEVEL
+            value: debug
+          - name: DATABASE_URL
+            value: "@Microsoft.KeyVault(SecretUri=https://myapp-kv.vault.azure.net/secrets/staging-database-url/)"
+      autoSwapSlotName: ""          # set to 'production' to enable auto-swap after health check
+
+    - name: canary
+      siteConfig:
+        linuxFxVersion: "NODE|20-lts"
+        alwaysOn: false
+        appSettings:
+          - name: NODE_ENV
+            value: canary
+
+  # Traffic routing (% of traffic to each slot)
+  trafficRouting:
+    - actionHostName: myapp-api-staging.azurewebsites.net
+      reroutePercentage: 10
+      changeDecisionCallbackUrl: ""
+      name: staging
+      changeStep: 5               # ramp up by 5% every interval
+      changeIntervalInMinutes: 10
+      minReroutePercentage: 0
+      maxReroutePercentage: 20
+
+# ---------------------------------------------------------------------------
+# Autoscale settings
+# ---------------------------------------------------------------------------
+autoscale:
+  name: myapp-autoscale
+  resourceGroup: myapp-rg
+  targetResourceUri: /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myapp-rg/providers/Microsoft.Web/serverfarms/myapp-plan
+  enabled: true
+
+  profiles:
+    # Default profile
+    - name: default
+      capacity:
+        minimum: "2"
+        maximum: "20"
+        default: "2"
+      rules:
+        # Scale out on high CPU
+        - metricTrigger:
+            metricName: CpuPercentage
+            metricResourceUri: /subscriptions/.../serverfarms/myapp-plan
+            timeGrain: PT1M
+            statistic: Average
+            timeWindow: PT5M
+            timeAggregation: Average
+            operator: GreaterThan
+            threshold: 70
+          scaleAction:
+            direction: Increase
+            type: ChangeCount
+            value: "2"
+            cooldown: PT5M
+
+        # Scale in on low CPU
+        - metricTrigger:
+            metricName: CpuPercentage
+            metricResourceUri: /subscriptions/.../serverfarms/myapp-plan
+            timeGrain: PT1M
+            statistic: Average
+            timeWindow: PT10M
+            timeAggregation: Average
+            operator: LessThan
+            threshold: 25
+          scaleAction:
+            direction: Decrease
+            type: ChangeCount
+            value: "1"
+            cooldown: PT10M
+
+        # Scale out on high memory
+        - metricTrigger:
+            metricName: MemoryPercentage
+            metricResourceUri: /subscriptions/.../serverfarms/myapp-plan
+            timeGrain: PT1M
+            statistic: Average
+            timeWindow: PT5M
+            timeAggregation: Average
+            operator: GreaterThan
+            threshold: 80
+          scaleAction:
+            direction: Increase
+            type: ChangeCount
+            value: "1"
+            cooldown: PT5M
+
+        # Scale out on high HTTP queue length
+        - metricTrigger:
+            metricName: HttpQueueLength
+            metricResourceUri: /subscriptions/.../serverfarms/myapp-plan
+            timeGrain: PT1M
+            statistic: Average
+            timeWindow: PT5M
+            timeAggregation: Average
+            operator: GreaterThan
+            threshold: 100
+          scaleAction:
+            direction: Increase
+            type: ChangeCount
+            value: "2"
+            cooldown: PT3M
+
+    # Business hours profile — keep more instances warm
+    - name: business-hours
+      capacity:
+        minimum: "4"
+        maximum: "20"
+        default: "4"
+      recurrence:
+        frequency: Week
+        schedule:
+          timeZone: UTC
+          days: [Monday, Tuesday, Wednesday, Thursday, Friday]
+          hours: [8]
+          minutes: [0]
+      rules: []
+
+    # Off-hours profile — scale down
+    - name: off-hours
+      capacity:
+        minimum: "1"
+        maximum: "10"
+        default: "2"
+      recurrence:
+        frequency: Week
+        schedule:
+          timeZone: UTC
+          days: [Monday, Tuesday, Wednesday, Thursday, Friday]
+          hours: [20]
+          minutes: [0]
+      rules: []
+
+# ---------------------------------------------------------------------------
+# Diagnostic settings (send logs to Log Analytics)
+# ---------------------------------------------------------------------------
+diagnosticSettings:
+  name: myapp-diag
+  workspaceId: /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myapp-rg/providers/Microsoft.OperationalInsights/workspaces/myapp-logs
+  logs:
+    - category: AppServiceHTTPLogs
+      enabled: true
+      retentionPolicy:
+        enabled: true
+        days: 30
+    - category: AppServiceConsoleLogs
+      enabled: true
+      retentionPolicy:
+        enabled: true
+        days: 7
+    - category: AppServiceAppLogs
+      enabled: true
+      retentionPolicy:
+        enabled: true
+        days: 30
+    - category: AppServiceAuditLogs
+      enabled: true
+      retentionPolicy:
+        enabled: true
+        days: 90
+  metrics:
+    - category: AllMetrics
+      enabled: true
+      retentionPolicy:
+        enabled: true
+        days: 30

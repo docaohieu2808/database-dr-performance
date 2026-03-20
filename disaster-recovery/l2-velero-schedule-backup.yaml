@@ -1,0 +1,200 @@
+# Velero scheduled backup manifests
+# Covers: full-cluster, namespace-scoped, database-only, and cross-region schedules
+# Apply: kubectl apply -f l2-velero-schedule-backup.yaml
+
+---
+# Full cluster backup — daily at 02:00 UTC, 30-day retention
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: full-cluster-daily-backup
+  namespace: velero
+  labels:
+    backup-tier: full
+    environment: production
+spec:
+  schedule: "0 2 * * *"       # cron: daily 02:00 UTC
+  useOwnerReferencesInBackup: false
+  template:
+    ttl: 720h                  # 30 days retention
+    storageLocation: default
+    volumeSnapshotLocations:
+      - default
+    snapshotVolumes: true
+    defaultVolumesToFsBackup: false
+    includeClusterResources: true
+    includedNamespaces:
+      - "*"
+    excludedNamespaces:
+      - kube-system
+      - kube-public
+      - kube-node-lease
+      - velero
+    excludedResources:
+      - events
+      - events.events.k8s.io
+    labelSelector: {}
+    metadata:
+      labels:
+        backup-type: full
+        schedule: daily
+
+---
+# Production namespace hourly backup — short retention for quick recovery
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: production-namespace-hourly-backup
+  namespace: velero
+  labels:
+    backup-tier: namespace
+    environment: production
+spec:
+  schedule: "0 * * * *"       # every hour
+  useOwnerReferencesInBackup: false
+  template:
+    ttl: 48h                   # 2 days retention
+    storageLocation: default
+    volumeSnapshotLocations:
+      - default
+    snapshotVolumes: true
+    defaultVolumesToFsBackup: false
+    includeClusterResources: false
+    includedNamespaces:
+      - production
+      - staging
+    excludedResources:
+      - events
+      - events.events.k8s.io
+    metadata:
+      labels:
+        backup-type: namespace-hourly
+
+---
+# Database PVCs only — every 6 hours, filesystem-level backup via node-agent
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: database-pvcs-6h-backup
+  namespace: velero
+  labels:
+    backup-tier: database
+    environment: production
+spec:
+  schedule: "0 */6 * * *"     # every 6 hours
+  useOwnerReferencesInBackup: false
+  template:
+    ttl: 168h                  # 7 days retention
+    storageLocation: default
+    snapshotVolumes: false
+    defaultVolumesToFsBackup: true   # use node-agent / restic for PVC data
+    includeClusterResources: false
+    includedNamespaces:
+      - production
+    includedResources:
+      - persistentvolumeclaims
+      - persistentvolumes
+      - pods
+      - deployments
+      - statefulsets
+    labelSelector:
+      matchLabels:
+        backup: "true"           # only resources with this label
+    orLabelSelectors:
+      - matchLabels:
+          app.kubernetes.io/component: database
+    metadata:
+      labels:
+        backup-type: database-pvcs
+
+---
+# Weekly full backup with longer retention — for compliance / audit
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: weekly-compliance-backup
+  namespace: velero
+  labels:
+    backup-tier: compliance
+    environment: production
+spec:
+  schedule: "0 1 * * 0"       # Sunday 01:00 UTC
+  useOwnerReferencesInBackup: false
+  template:
+    ttl: 8760h                 # 365 days retention
+    storageLocation: default
+    volumeSnapshotLocations:
+      - default
+    snapshotVolumes: true
+    defaultVolumesToFsBackup: false
+    includeClusterResources: true
+    includedNamespaces:
+      - "*"
+    excludedNamespaces:
+      - kube-system
+      - velero
+    metadata:
+      labels:
+        backup-type: compliance
+        schedule: weekly
+
+---
+# Cross-region backup — replicates to secondary BSL in eu-west-1
+# Requires a second BackupStorageLocation configured in Velero
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: cross-region-dr-backup
+  namespace: velero
+  labels:
+    backup-tier: dr
+    environment: production
+spec:
+  schedule: "30 2 * * *"      # daily 02:30 UTC (after full backup starts)
+  useOwnerReferencesInBackup: false
+  template:
+    ttl: 336h                  # 14 days
+    storageLocation: eu-west-1  # secondary BSL
+    volumeSnapshotLocations:
+      - eu-west-1
+    snapshotVolumes: true
+    includeClusterResources: true
+    includedNamespaces:
+      - production
+    metadata:
+      labels:
+        backup-type: cross-region-dr
+
+---
+# Secondary BackupStorageLocation for eu-west-1 (DR region)
+apiVersion: velero.io/v1
+kind: BackupStorageLocation
+metadata:
+  name: eu-west-1
+  namespace: velero
+spec:
+  provider: aws
+  objectStorage:
+    bucket: my-velero-backups-eu
+    prefix: velero-dr
+  config:
+    region: eu-west-1
+    kmsKeyId: ""
+    serverSideEncryption: AES256
+  credential:
+    name: velero-credentials
+    key: cloud
+  accessMode: ReadWrite
+  default: false
+
+---
+# VolumeSnapshotLocation for eu-west-1
+apiVersion: velero.io/v1
+kind: VolumeSnapshotLocation
+metadata:
+  name: eu-west-1
+  namespace: velero
+spec:
+  provider: aws
+  config:
+    region: eu-west-1

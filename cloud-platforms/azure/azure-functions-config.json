@@ -1,0 +1,359 @@
+{
+  "_comment": "Azure Functions app configuration — host.json + function definitions + bindings reference",
+  "_docs": "https://learn.microsoft.com/en-us/azure/azure-functions/functions-host-json",
+
+  "host": {
+    "version": "2.0",
+    "functionTimeout": "00:05:00",
+    "healthMonitor": {
+      "enabled": true,
+      "healthCheckInterval": "00:00:10",
+      "healthCheckWindow": "00:02:00",
+      "healthCheckThreshold": 6,
+      "counterThreshold": 0.80
+    },
+    "logging": {
+      "fileLoggingMode": "debugOnly",
+      "logLevel": {
+        "default": "Information",
+        "Host.Results": "Error",
+        "Function": "Information",
+        "Host.Aggregator": "Trace"
+      },
+      "applicationInsights": {
+        "samplingSettings": {
+          "isEnabled": true,
+          "maxTelemetryItemsPerSecond": 20,
+          "evaluationInterval": "01:00:00",
+          "initialSamplingPercentage": 100.0,
+          "samplingPercentageDecreaseTimeout": "00:02:00",
+          "samplingPercentageIncreaseTimeout": "00:15:00",
+          "minSamplingPercentage": 5.0,
+          "movingAverageRatio": 1.0,
+          "excludedTypes": "Request;Exception"
+        },
+        "enableLiveTelemetry": true,
+        "enableDependencyTracking": true,
+        "enablePerformanceCountersCollection": true,
+        "httpAutoCollectionOptions": {
+          "enableHttpTriggerExtendedInfoCollection": true,
+          "enableW3CDistributedTracing": true,
+          "enableResponseHeaderInjection": true
+        }
+      }
+    },
+    "aggregator": {
+      "batchSize": 1000,
+      "flushTimeout": "00:00:30"
+    },
+    "retry": {
+      "strategy": "exponentialBackoff",
+      "maxRetryCount": 5,
+      "minimumInterval": "00:00:02",
+      "maximumInterval": "00:15:00"
+    },
+    "extensions": {
+      "http": {
+        "routePrefix": "api",
+        "maxOutstandingRequests": 200,
+        "maxConcurrentRequests": 100,
+        "dynamicThrottlesEnabled": true,
+        "hsts": {
+          "isEnabled": true,
+          "maxAge": "10"
+        },
+        "customHeaders": {
+          "X-Content-Type-Options": "nosniff",
+          "X-Frame-Options": "DENY",
+          "Strict-Transport-Security": "max-age=31536000; includeSubDomains"
+        }
+      },
+      "serviceBus": {
+        "prefetchCount": 0,
+        "autoCompleteMessages": true,
+        "maxAutoLockRenewalDuration": "00:05:00",
+        "maxConcurrentCalls": 16,
+        "maxConcurrentSessions": 8,
+        "maxMessageBatchSize": 1000,
+        "sessionIdleTimeout": "00:01:00",
+        "enableCrossEntityTransactions": false
+      },
+      "eventHubs": {
+        "maxEventBatchSize": 100,
+        "minEventBatchSize": 1,
+        "maxWaitTime": "00:00:30",
+        "batchCheckpointFrequency": 1,
+        "prefetchCount": 300,
+        "transportType": "amqpWebSockets"
+      },
+      "queues": {
+        "maxPollingInterval": "00:00:02",
+        "visibilityTimeout": "00:00:00",
+        "batchSize": 16,
+        "maxDequeueCount": 5,
+        "newBatchThreshold": 8,
+        "messageEncoding": "base64"
+      },
+      "blobs": {
+        "maxDegreeOfParallelism": 8,
+        "poisonBlobThreshold": 1
+      },
+      "cosmosDB": {
+        "connectionMode": "Gateway",
+        "protocol": "Https",
+        "leaseOptions": {
+          "leasePrefix": "myapp"
+        }
+      },
+      "durableTask": {
+        "hubName": "MyAppHub",
+        "storageProvider": {
+          "maxQueuePollingInterval": "00:00:02",
+          "controlQueueBatchSize": 32,
+          "controlQueueBufferThreshold": 256,
+          "controlQueueVisibilityTimeout": "00:05:00",
+          "maxConcurrentActivityFunctions": 10,
+          "maxConcurrentOrchestratorFunctions": 10,
+          "trackingStoreConnectionStringName": "DurableTaskTrackingStorage",
+          "trackingStoreNamePrefix": "DurableTask"
+        },
+        "tracing": {
+          "traceInputsAndOutputs": false,
+          "traceReplayEvents": false
+        },
+        "notifications": {
+          "eventGrid": {
+            "topicEndpoint": "https://myapp-durable-events.eventgrid.azure.net/api/events",
+            "keySettingName": "EventGridTopicKey",
+            "publishRetryCount": 3,
+            "publishRetryInterval": "00:00:30",
+            "publishEventTypes": [
+              "Started", "Pending", "Failed", "Terminated"
+            ]
+          }
+        }
+      }
+    },
+    "concurrency": {
+      "dynamicConcurrencyEnabled": true,
+      "snapshotPersistenceEnabled": true
+    },
+    "managedDependency": {
+      "enabled": false
+    }
+  },
+
+  "functionApp": {
+    "name": "myapp-functions",
+    "resourceGroup": "myapp-rg",
+    "location": "eastus",
+    "kind": "functionapp,linux",
+    "sku": "EP2",
+    "runtime": "node",
+    "runtimeVersion": "~20",
+    "storageAccountName": "myappfunctionsstorage",
+    "applicationInsightsName": "myapp-appinsights",
+    "identity": {
+      "type": "SystemAssigned"
+    },
+    "siteConfig": {
+      "linuxFxVersion": "Node|20",
+      "http20Enabled": true,
+      "ftpsState": "Disabled",
+      "minTlsVersion": "1.2",
+      "use32BitWorkerProcess": false,
+      "alwaysOn": false,
+      "appSettings": [
+        { "name": "FUNCTIONS_EXTENSION_VERSION",   "value": "~4" },
+        { "name": "FUNCTIONS_WORKER_RUNTIME",      "value": "node" },
+        { "name": "WEBSITE_NODE_DEFAULT_VERSION",  "value": "~20" },
+        { "name": "AzureWebJobsStorage",           "value": "@Microsoft.KeyVault(SecretUri=https://myapp-kv.vault.azure.net/secrets/storage-connection-string/)" },
+        { "name": "APPLICATIONINSIGHTS_CONNECTION_STRING", "value": "@Microsoft.KeyVault(SecretUri=https://myapp-kv.vault.azure.net/secrets/appinsights-connection-string/)" },
+        { "name": "DATABASE_URL",                  "value": "@Microsoft.KeyVault(SecretUri=https://myapp-kv.vault.azure.net/secrets/database-url/)" },
+        { "name": "REDIS_CONNECTION",              "value": "@Microsoft.KeyVault(SecretUri=https://myapp-kv.vault.azure.net/secrets/redis-connection/)" },
+        { "name": "SERVICE_BUS_CONNECTION",        "value": "@Microsoft.KeyVault(SecretUri=https://myapp-kv.vault.azure.net/secrets/service-bus-connection/)" },
+        { "name": "NODE_ENV",                      "value": "production" },
+        { "name": "LOG_LEVEL",                     "value": "info" },
+        { "name": "WEBSITE_RUN_FROM_PACKAGE",      "value": "1" }
+      ]
+    }
+  },
+
+  "functions": [
+    {
+      "name": "HttpTriggerApi",
+      "description": "REST API HTTP trigger — handles CRUD operations",
+      "entryPoint": "src/functions/httpTriggerApi",
+      "scriptFile": "dist/functions/httpTriggerApi.js",
+      "bindings": [
+        {
+          "type": "httpTrigger",
+          "direction": "in",
+          "name": "req",
+          "authLevel": "anonymous",
+          "methods": ["GET", "POST", "PUT", "DELETE", "PATCH"],
+          "route": "items/{id?}"
+        },
+        {
+          "type": "http",
+          "direction": "out",
+          "name": "res"
+        }
+      ],
+      "retry": {
+        "strategy": "fixedDelay",
+        "maxRetryCount": 3,
+        "delayInterval": "00:00:05"
+      }
+    },
+
+    {
+      "name": "ServiceBusProcessor",
+      "description": "Process messages from Azure Service Bus queue",
+      "entryPoint": "src/functions/serviceBusProcessor",
+      "scriptFile": "dist/functions/serviceBusProcessor.js",
+      "bindings": [
+        {
+          "type": "serviceBusTrigger",
+          "direction": "in",
+          "name": "message",
+          "queueName": "myapp-events",
+          "connection": "SERVICE_BUS_CONNECTION",
+          "isSessionsEnabled": false,
+          "cardinality": "many"
+        }
+      ],
+      "retry": {
+        "strategy": "exponentialBackoff",
+        "maxRetryCount": 5,
+        "minimumInterval": "00:00:10",
+        "maximumInterval": "00:10:00"
+      }
+    },
+
+    {
+      "name": "BlobStorageProcessor",
+      "description": "Process files uploaded to Azure Blob Storage",
+      "entryPoint": "src/functions/blobStorageProcessor",
+      "scriptFile": "dist/functions/blobStorageProcessor.js",
+      "bindings": [
+        {
+          "type": "blobTrigger",
+          "direction": "in",
+          "name": "blob",
+          "path": "uploads/{name}",
+          "connection": "AzureWebJobsStorage",
+          "dataType": "binary"
+        },
+        {
+          "type": "blob",
+          "direction": "out",
+          "name": "outputBlob",
+          "path": "processed/{name}",
+          "connection": "AzureWebJobsStorage"
+        }
+      ]
+    },
+
+    {
+      "name": "TimerCleanup",
+      "description": "Scheduled cleanup of expired records — runs daily at 03:00 UTC",
+      "entryPoint": "src/functions/timerCleanup",
+      "scriptFile": "dist/functions/timerCleanup.js",
+      "bindings": [
+        {
+          "type": "timerTrigger",
+          "direction": "in",
+          "name": "timer",
+          "schedule": "0 0 3 * * *",
+          "runOnStartup": false,
+          "useMonitor": true
+        }
+      ]
+    },
+
+    {
+      "name": "EventHubIngestion",
+      "description": "Ingest high-throughput telemetry events from Event Hub",
+      "entryPoint": "src/functions/eventHubIngestion",
+      "scriptFile": "dist/functions/eventHubIngestion.js",
+      "bindings": [
+        {
+          "type": "eventHubTrigger",
+          "direction": "in",
+          "name": "events",
+          "eventHubName": "myapp-telemetry",
+          "connection": "EVENT_HUB_CONNECTION",
+          "consumerGroup": "$Default",
+          "cardinality": "many",
+          "dataType": "string"
+        },
+        {
+          "type": "cosmosDB",
+          "direction": "out",
+          "name": "documents",
+          "databaseName": "myapp",
+          "collectionName": "telemetry",
+          "createIfNotExists": true,
+          "connectionStringSetting": "COSMOS_DB_CONNECTION",
+          "partitionKey": "/deviceId"
+        }
+      ]
+    },
+
+    {
+      "name": "DurableOrchestrator",
+      "description": "Durable Functions orchestrator — multi-step order processing workflow",
+      "entryPoint": "src/functions/durableOrchestrator",
+      "scriptFile": "dist/functions/durableOrchestrator.js",
+      "bindings": [
+        {
+          "type": "orchestrationTrigger",
+          "direction": "in",
+          "name": "context"
+        }
+      ]
+    },
+
+    {
+      "name": "DurableStarter",
+      "description": "HTTP starter for Durable orchestration",
+      "entryPoint": "src/functions/durableStarter",
+      "scriptFile": "dist/functions/durableStarter.js",
+      "bindings": [
+        {
+          "type": "httpTrigger",
+          "direction": "in",
+          "name": "req",
+          "authLevel": "function",
+          "methods": ["POST"],
+          "route": "orchestrators/{functionName}"
+        },
+        {
+          "type": "http",
+          "direction": "out",
+          "name": "res"
+        },
+        {
+          "type": "durableClient",
+          "direction": "in",
+          "name": "client"
+        }
+      ]
+    }
+  ],
+
+  "scaling": {
+    "maximumInstanceCount": 100,
+    "instanceMemoryMB": 2048
+  },
+
+  "deployment": {
+    "comment": "Deploy via Azure Functions Core Tools or GitHub Actions",
+    "cliCommands": [
+      "func azure functionapp publish myapp-functions --build remote",
+      "az functionapp deployment source config-zip --resource-group myapp-rg --name myapp-functions --src dist.zip"
+    ],
+    "githubActionsWorkflow": ".github/workflows/deploy-azure-functions.yml"
+  }
+}

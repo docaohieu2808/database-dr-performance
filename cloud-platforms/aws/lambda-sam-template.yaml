@@ -1,0 +1,373 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+# SAM serverless template — API Gateway + Lambda + DynamoDB + SQS
+# Docs: https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/
+#
+# Deploy:
+#   sam build
+#   sam deploy --guided
+#   sam deploy --config-env production
+
+Description: MyApp serverless backend — REST API with Lambda functions
+
+# ---------------------------------------------------------------------------
+# Global defaults applied to all Lambda functions
+# ---------------------------------------------------------------------------
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Architectures: [arm64]        # Graviton2 — cheaper + faster for most workloads
+    MemorySize: 512
+    Timeout: 30
+    Environment:
+      Variables:
+        NODE_ENV: !Ref Environment
+        LOG_LEVEL: info
+        POWERTOOLS_SERVICE_NAME: myapp-api
+        POWERTOOLS_METRICS_NAMESPACE: MyApp
+        TABLE_NAME: !Ref AppTable
+        QUEUE_URL: !Ref EventQueue
+        CACHE_ENDPOINT: !Ref ElastiCacheEndpoint
+    Tracing: Active              # AWS X-Ray
+    Layers:
+      - !Ref CommonLayer
+    VpcConfig:
+      SecurityGroupIds:
+        - !Ref LambdaSecurityGroup
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+    Tags:
+      Environment: !Ref Environment
+      Service: myapp-api
+      ManagedBy: sam
+
+  Api:
+    TracingEnabled: true
+    Cors:
+      AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+      AllowHeaders: "'Content-Type,Authorization,X-Request-ID'"
+      AllowOrigin: "'*'"
+    Auth:
+      DefaultAuthorizer: CognitoAuthorizer
+      Authorizers:
+        CognitoAuthorizer:
+          UserPoolArn: !GetAtt UserPool.Arn
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [development, staging, production]
+  ElastiCacheEndpoint:
+    Type: String
+    Default: ""
+    Description: ElastiCache Redis endpoint (optional)
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet::Id
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet::Id
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+Resources:
+  # -------------------------------------------------------------------------
+  # API Gateway
+  # -------------------------------------------------------------------------
+  MyAppApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "myapp-api-${Environment}"
+      StageName: !Ref Environment
+      Description: MyApp REST API
+      EndpointConfiguration:
+        Type: REGIONAL
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          LoggingLevel: ERROR
+          DataTraceEnabled: false
+          MetricsEnabled: true
+          ThrottlingBurstLimit: 500
+          ThrottlingRateLimit: 1000
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: >
+          {"requestId":"$context.requestId","ip":"$context.identity.sourceIp",
+          "caller":"$context.identity.caller","user":"$context.identity.user",
+          "requestTime":"$context.requestTime","httpMethod":"$context.httpMethod",
+          "resourcePath":"$context.resourcePath","status":"$context.status",
+          "protocol":"$context.protocol","responseLength":"$context.responseLength",
+          "integrationLatency":"$context.integrationLatency",
+          "responseLatency":"$context.responseLatency"}
+      GatewayResponses:
+        DEFAULT_4XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+        DEFAULT_5XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+
+  # -------------------------------------------------------------------------
+  # Lambda functions
+  # -------------------------------------------------------------------------
+  GetItemsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "myapp-get-items-${Environment}"
+      Handler: src/handlers/items.getItems
+      Description: List all items with pagination
+      MemorySize: 256
+      ReservedConcurrentExecutions: 100
+      Events:
+        GetItems:
+          Type: Api
+          Properties:
+            RestApiId: !Ref MyAppApi
+            Path: /items
+            Method: GET
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref AppTable
+        - CloudWatchPutMetricPolicy: {}
+
+  CreateItemFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "myapp-create-item-${Environment}"
+      Handler: src/handlers/items.createItem
+      Description: Create a new item
+      MemorySize: 512
+      ReservedConcurrentExecutions: 50
+      Events:
+        CreateItem:
+          Type: Api
+          Properties:
+            RestApiId: !Ref MyAppApi
+            Path: /items
+            Method: POST
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt EventQueue.QueueName
+
+  ProcessEventsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "myapp-process-events-${Environment}"
+      Handler: src/handlers/events.processEvents
+      Description: Process events from SQS queue
+      Timeout: 60
+      MemorySize: 1024
+      ReservedConcurrentExecutions: 10
+      Events:
+        SQSTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt EventQueue.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+            FunctionResponseTypes:
+              - ReportBatchItemFailures   # partial batch failure support
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: !GetAtt EventQueue.QueueName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppTable
+
+  ScheduledCleanupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "myapp-scheduled-cleanup-${Environment}"
+      Handler: src/handlers/cleanup.run
+      Description: Scheduled job to clean up expired items
+      Timeout: 300
+      MemorySize: 256
+      Events:
+        ScheduleRule:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: "cron(0 3 * * ? *)"    # 03:00 UTC daily
+            RetryPolicy:
+              MaximumRetryAttempts: 2
+              MaximumEventAgeInSeconds: 3600
+            DeadLetterConfig:
+              Arn: !GetAtt DeadLetterQueue.Arn
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AppTable
+
+  # -------------------------------------------------------------------------
+  # Lambda Layer (shared dependencies)
+  # -------------------------------------------------------------------------
+  CommonLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "myapp-common-${Environment}"
+      Description: Shared Node.js dependencies and utilities
+      ContentUri: layers/common/
+      CompatibleRuntimes: [nodejs20.x]
+      CompatibleArchitectures: [arm64]
+      RetentionPolicy: Retain
+    Metadata:
+      BuildMethod: nodejs20.x
+
+  # -------------------------------------------------------------------------
+  # DynamoDB table (single-table design)
+  # -------------------------------------------------------------------------
+  AppTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "myapp-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+        - AttributeName: GSI2PK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: GSI2
+          KeySchema:
+            - AttributeName: GSI2PK
+              KeyType: HASH
+          Projection:
+            ProjectionType: KEYS_ONLY
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # -------------------------------------------------------------------------
+  # SQS queues
+  # -------------------------------------------------------------------------
+  EventQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "myapp-events-${Environment}"
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 86400
+      ReceiveMessageWaitTimeSeconds: 20   # long polling
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
+        maxReceiveCount: 3
+      KmsMasterKeyId: alias/aws/sqs
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "myapp-events-dlq-${Environment}"
+      MessageRetentionPeriod: 1209600    # 14 days
+      KmsMasterKeyId: alias/aws/sqs
+
+  # -------------------------------------------------------------------------
+  # Cognito User Pool
+  # -------------------------------------------------------------------------
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "myapp-${Environment}"
+      AutoVerifiedAttributes: [email]
+      UsernameAttributes: [email]
+      MfaConfiguration: OPTIONAL
+      EnabledMfas: [SOFTWARE_TOKEN_MFA]
+      PasswordPolicy:
+        MinimumLength: 12
+        RequireUppercase: true
+        RequireLowercase: true
+        RequireNumbers: true
+        RequireSymbols: true
+
+  # -------------------------------------------------------------------------
+  # Security group for Lambda VPC access
+  # -------------------------------------------------------------------------
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Lambda function security group
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 10.0.0.0/8
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          CidrIp: 10.0.0.0/8
+
+  # -------------------------------------------------------------------------
+  # CloudWatch log groups
+  # -------------------------------------------------------------------------
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/apigateway/myapp-${Environment}"
+      RetentionInDays: 30
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${MyAppApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+    Export:
+      Name: !Sub "myapp-api-endpoint-${Environment}"
+
+  TableName:
+    Description: DynamoDB table name
+    Value: !Ref AppTable
+    Export:
+      Name: !Sub "myapp-table-${Environment}"
+
+  EventQueueUrl:
+    Description: SQS event queue URL
+    Value: !Ref EventQueue
+    Export:
+      Name: !Sub "myapp-event-queue-${Environment}"

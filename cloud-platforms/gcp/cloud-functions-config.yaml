@@ -1,0 +1,294 @@
+# Google Cloud Functions v2 configuration
+# Event-driven serverless functions: HTTP triggers, Pub/Sub, Cloud Storage, Firestore
+# Docs: https://cloud.google.com/functions/docs/reference/rest/v2/projects.locations.functions
+#
+# Deploy all functions:
+#   gcloud functions deploy <function-name> --gen2 --region us-central1 \
+#     --runtime nodejs20 --trigger-http --allow-unauthenticated
+#
+# Or via config (gcloud functions deploy reads these flags):
+#   gcloud functions deploy myapp-http-handler \
+#     --gen2 --region us-central1 \
+#     --runtime nodejs20 \
+#     --source ./functions/http-handler \
+#     --entry-point handler \
+#     --trigger-http \
+#     --allow-unauthenticated \
+#     --memory 512MB --cpu 1 \
+#     --min-instances 0 --max-instances 100 \
+#     --timeout 30s \
+#     --set-env-vars NODE_ENV=production \
+#     --set-secrets DATABASE_URL=myapp-database-url:latest
+
+# ---------------------------------------------------------------------------
+# Function definitions (declarative reference — deploy individually via gcloud)
+# ---------------------------------------------------------------------------
+functions:
+  # -------------------------------------------------------------------------
+  # 1. HTTP-triggered REST API handler
+  # -------------------------------------------------------------------------
+  - name: myapp-http-handler
+    region: us-central1
+    runtime: nodejs20
+    entryPoint: handler
+    source: ./functions/http-handler
+    trigger:
+      type: http
+      allowUnauthenticated: true
+    resources:
+      memory: 512MB
+      cpu: "1"
+    scaling:
+      minInstances: 0
+      maxInstances: 100
+      concurrency: 80            # requests per instance (gen2 only)
+    timeout: 30s
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: info
+      GCP_PROJECT: my-gcp-project
+    secrets:
+      - envVar: DATABASE_URL
+        secret: myapp-database-url
+        version: latest
+      - envVar: JWT_SECRET
+        secret: myapp-jwt-secret
+        version: latest
+    vpcConnector: projects/my-gcp-project/locations/us-central1/connectors/myapp-vpc-connector
+    vpcConnectorEgressSettings: PRIVATE_RANGES_ONLY
+    serviceAccount: myapp-functions-sa@my-gcp-project.iam.gserviceaccount.com
+    labels:
+      app: myapp
+      trigger: http
+      environment: production
+
+  # -------------------------------------------------------------------------
+  # 2. Pub/Sub event processor
+  # -------------------------------------------------------------------------
+  - name: myapp-pubsub-processor
+    region: us-central1
+    runtime: nodejs20
+    entryPoint: processPubSubMessage
+    source: ./functions/pubsub-processor
+    trigger:
+      type: pubsub
+      topic: projects/my-gcp-project/topics/myapp-events
+    resources:
+      memory: 512MB
+      cpu: "1"
+    scaling:
+      minInstances: 0
+      maxInstances: 50
+    timeout: 60s
+    retryOnFailure: true
+    environment:
+      NODE_ENV: production
+      GCP_PROJECT: my-gcp-project
+    secrets:
+      - envVar: DATABASE_URL
+        secret: myapp-database-url
+        version: latest
+    vpcConnector: projects/my-gcp-project/locations/us-central1/connectors/myapp-vpc-connector
+    vpcConnectorEgressSettings: PRIVATE_RANGES_ONLY
+    serviceAccount: myapp-functions-sa@my-gcp-project.iam.gserviceaccount.com
+    labels:
+      app: myapp
+      trigger: pubsub
+      environment: production
+
+  # -------------------------------------------------------------------------
+  # 3. Cloud Storage trigger — process uploaded files
+  # -------------------------------------------------------------------------
+  - name: myapp-storage-processor
+    region: us-central1
+    runtime: python312
+    entryPoint: process_upload
+    source: ./functions/storage-processor
+    trigger:
+      type: storage
+      bucket: myapp-uploads-production
+      event: google.cloud.storage.object.v1.finalized
+    resources:
+      memory: 1GB
+      cpu: "2"
+    scaling:
+      minInstances: 0
+      maxInstances: 20
+    timeout: 300s
+    environment:
+      GCP_PROJECT: my-gcp-project
+      OUTPUT_BUCKET: myapp-processed-production
+      LOG_LEVEL: INFO
+    secrets:
+      - envVar: PROCESSING_API_KEY
+        secret: myapp-processing-api-key
+        version: latest
+    serviceAccount: myapp-functions-sa@my-gcp-project.iam.gserviceaccount.com
+    labels:
+      app: myapp
+      trigger: storage
+      environment: production
+
+  # -------------------------------------------------------------------------
+  # 4. Firestore trigger — react to document changes
+  # -------------------------------------------------------------------------
+  - name: myapp-firestore-trigger
+    region: us-central1
+    runtime: nodejs20
+    entryPoint: onDocumentWrite
+    source: ./functions/firestore-trigger
+    trigger:
+      type: firestore
+      document: "users/{userId}/orders/{orderId}"
+      event: google.cloud.firestore.document.v1.written
+    resources:
+      memory: 256MB
+      cpu: "0.333"
+    scaling:
+      minInstances: 0
+      maxInstances: 30
+    timeout: 30s
+    environment:
+      NODE_ENV: production
+      GCP_PROJECT: my-gcp-project
+      NOTIFICATION_TOPIC: projects/my-gcp-project/topics/order-notifications
+    serviceAccount: myapp-functions-sa@my-gcp-project.iam.gserviceaccount.com
+    labels:
+      app: myapp
+      trigger: firestore
+      environment: production
+
+  # -------------------------------------------------------------------------
+  # 5. Scheduled function (Cloud Scheduler → Pub/Sub → Function)
+  # -------------------------------------------------------------------------
+  - name: myapp-scheduled-cleanup
+    region: us-central1
+    runtime: python312
+    entryPoint: run_cleanup
+    source: ./functions/scheduled-cleanup
+    trigger:
+      type: pubsub
+      topic: projects/my-gcp-project/topics/myapp-scheduled-tasks
+    resources:
+      memory: 512MB
+      cpu: "1"
+    scaling:
+      minInstances: 0
+      maxInstances: 1
+    timeout: 540s
+    environment:
+      GCP_PROJECT: my-gcp-project
+      RETENTION_DAYS: "30"
+      DRY_RUN: "false"
+    secrets:
+      - envVar: DATABASE_URL
+        secret: myapp-database-url
+        version: latest
+    vpcConnector: projects/my-gcp-project/locations/us-central1/connectors/myapp-vpc-connector
+    vpcConnectorEgressSettings: PRIVATE_RANGES_ONLY
+    serviceAccount: myapp-functions-sa@my-gcp-project.iam.gserviceaccount.com
+    labels:
+      app: myapp
+      trigger: schedule
+      environment: production
+
+# ---------------------------------------------------------------------------
+# Cloud Scheduler job to trigger scheduled cleanup via Pub/Sub
+# gcloud scheduler jobs create pubsub myapp-daily-cleanup \
+#   --schedule "0 3 * * *" \
+#   --topic myapp-scheduled-tasks \
+#   --message-body '{"action":"cleanup","retention_days":30}' \
+#   --time-zone "UTC" \
+#   --location us-central1
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Supporting infrastructure (create before deploying functions)
+# ---------------------------------------------------------------------------
+infrastructure:
+  pubsubTopics:
+    - name: myapp-events
+      messageRetentionDuration: 604800s    # 7 days
+      subscriptions:
+        - name: myapp-events-sub
+          ackDeadlineSeconds: 60
+          retryPolicy:
+            minimumBackoff: 10s
+            maximumBackoff: 600s
+          deadLetterPolicy:
+            deadLetterTopic: projects/my-gcp-project/topics/myapp-events-dlq
+            maxDeliveryAttempts: 5
+
+    - name: myapp-scheduled-tasks
+      messageRetentionDuration: 3600s
+
+    - name: order-notifications
+      messageRetentionDuration: 86400s
+
+  storageBuckets:
+    - name: myapp-uploads-production
+      location: US
+      storageClass: STANDARD
+      versioning: true
+      lifecycleRules:
+        - action: Delete
+          condition:
+            age: 90
+        - action: SetStorageClass
+          storageClass: NEARLINE
+          condition:
+            age: 30
+      iamPolicy:
+        - role: roles/storage.objectCreator
+          members:
+            - serviceAccount:myapp-functions-sa@my-gcp-project.iam.gserviceaccount.com
+
+    - name: myapp-processed-production
+      location: US
+      storageClass: STANDARD
+
+  serviceAccount:
+    name: myapp-functions-sa
+    project: my-gcp-project
+    roles:
+      - roles/cloudsql.client
+      - roles/pubsub.publisher
+      - roles/pubsub.subscriber
+      - roles/storage.objectAdmin
+      - roles/secretmanager.secretAccessor
+      - roles/datastore.user
+      - roles/cloudtrace.agent
+      - roles/monitoring.metricWriter
+      - roles/logging.logWriter
+
+# ---------------------------------------------------------------------------
+# Sample function source stubs
+# ---------------------------------------------------------------------------
+# functions/http-handler/index.js:
+#   const { SecretManagerServiceClient } = require('@google-cloud/secret-manager');
+#   exports.handler = async (req, res) => {
+#     res.set('Access-Control-Allow-Origin', '*');
+#     if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+#     try {
+#       const result = await processRequest(req.body);
+#       res.status(200).json({ success: true, data: result });
+#     } catch (err) {
+#       console.error(err);
+#       res.status(500).json({ success: false, error: err.message });
+#     }
+#   };
+#
+# functions/pubsub-processor/index.js:
+#   exports.processPubSubMessage = async (cloudEvent) => {
+#     const msg = JSON.parse(Buffer.from(cloudEvent.data.message.data, 'base64').toString());
+#     console.log('Processing event:', JSON.stringify(msg));
+#     await handleEvent(msg);
+#   };
+#
+# functions/storage-processor/main.py:
+#   def process_upload(cloud_event):
+#       data = cloud_event.data
+#       bucket = data["bucket"]
+#       name = data["name"]
+#       print(f"Processing gs://{bucket}/{name}")
+#       # process file...

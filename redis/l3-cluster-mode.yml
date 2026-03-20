@@ -1,0 +1,227 @@
+version: "3.9"
+
+# Redis Cluster: 6 nodes (3 primary + 3 replica)
+# Automatic sharding across 16384 hash slots
+# Tolerates loss of 1 primary (replica promotes automatically)
+# Each primary owns ~5461 slots; replicas are hot standby
+
+x-redis-cluster-node: &redis-cluster-node
+  image: redis:7.2-alpine
+  restart: unless-stopped
+  networks:
+    - redis-cluster-net
+  ulimits:
+    nofile:
+      soft: 65536
+      hard: 65536
+
+services:
+  redis-node-1:
+    <<: *redis-cluster-node
+    container_name: redis-node-1
+    ports:
+      - "7001:6379"
+      - "17001:16379"   # cluster bus port = data port + 10000
+    volumes:
+      - redis-node-1-data:/data
+    command: >
+      redis-server
+        --port 6379
+        --cluster-enabled yes
+        --cluster-config-file nodes.conf
+        --cluster-node-timeout 5000
+        --cluster-announce-ip redis-node-1
+        --cluster-announce-port 6379
+        --cluster-announce-bus-port 16379
+        --requirepass ${REDIS_PASSWORD:-clusterpassword}
+        --masterauth ${REDIS_PASSWORD:-clusterpassword}
+        --appendonly yes
+        --appendfsync everysec
+        --maxmemory 256mb
+        --maxmemory-policy allkeys-lru
+        --loglevel notice
+
+  redis-node-2:
+    <<: *redis-cluster-node
+    container_name: redis-node-2
+    ports:
+      - "7002:6379"
+      - "17002:16379"
+    volumes:
+      - redis-node-2-data:/data
+    command: >
+      redis-server
+        --port 6379
+        --cluster-enabled yes
+        --cluster-config-file nodes.conf
+        --cluster-node-timeout 5000
+        --cluster-announce-ip redis-node-2
+        --cluster-announce-port 6379
+        --cluster-announce-bus-port 16379
+        --requirepass ${REDIS_PASSWORD:-clusterpassword}
+        --masterauth ${REDIS_PASSWORD:-clusterpassword}
+        --appendonly yes
+        --appendfsync everysec
+        --maxmemory 256mb
+        --maxmemory-policy allkeys-lru
+        --loglevel notice
+
+  redis-node-3:
+    <<: *redis-cluster-node
+    container_name: redis-node-3
+    ports:
+      - "7003:6379"
+      - "17003:16379"
+    volumes:
+      - redis-node-3-data:/data
+    command: >
+      redis-server
+        --port 6379
+        --cluster-enabled yes
+        --cluster-config-file nodes.conf
+        --cluster-node-timeout 5000
+        --cluster-announce-ip redis-node-3
+        --cluster-announce-port 6379
+        --cluster-announce-bus-port 16379
+        --requirepass ${REDIS_PASSWORD:-clusterpassword}
+        --masterauth ${REDIS_PASSWORD:-clusterpassword}
+        --appendonly yes
+        --appendfsync everysec
+        --maxmemory 256mb
+        --maxmemory-policy allkeys-lru
+        --loglevel notice
+
+  redis-node-4:
+    <<: *redis-cluster-node
+    container_name: redis-node-4
+    ports:
+      - "7004:6379"
+      - "17004:16379"
+    volumes:
+      - redis-node-4-data:/data
+    command: >
+      redis-server
+        --port 6379
+        --cluster-enabled yes
+        --cluster-config-file nodes.conf
+        --cluster-node-timeout 5000
+        --cluster-announce-ip redis-node-4
+        --cluster-announce-port 6379
+        --cluster-announce-bus-port 16379
+        --requirepass ${REDIS_PASSWORD:-clusterpassword}
+        --masterauth ${REDIS_PASSWORD:-clusterpassword}
+        --appendonly yes
+        --appendfsync everysec
+        --maxmemory 256mb
+        --maxmemory-policy allkeys-lru
+        --loglevel notice
+
+  redis-node-5:
+    <<: *redis-cluster-node
+    container_name: redis-node-5
+    ports:
+      - "7005:6379"
+      - "17005:16379"
+    volumes:
+      - redis-node-5-data:/data
+    command: >
+      redis-server
+        --port 6379
+        --cluster-enabled yes
+        --cluster-config-file nodes.conf
+        --cluster-node-timeout 5000
+        --cluster-announce-ip redis-node-5
+        --cluster-announce-port 6379
+        --cluster-announce-bus-port 16379
+        --requirepass ${REDIS_PASSWORD:-clusterpassword}
+        --masterauth ${REDIS_PASSWORD:-clusterpassword}
+        --appendonly yes
+        --appendfsync everysec
+        --maxmemory 256mb
+        --maxmemory-policy allkeys-lru
+        --loglevel notice
+
+  redis-node-6:
+    <<: *redis-cluster-node
+    container_name: redis-node-6
+    ports:
+      - "7006:6379"
+      - "17006:16379"
+    volumes:
+      - redis-node-6-data:/data
+    command: >
+      redis-server
+        --port 6379
+        --cluster-enabled yes
+        --cluster-config-file nodes.conf
+        --cluster-node-timeout 5000
+        --cluster-announce-ip redis-node-6
+        --cluster-announce-port 6379
+        --cluster-announce-bus-port 16379
+        --requirepass ${REDIS_PASSWORD:-clusterpassword}
+        --masterauth ${REDIS_PASSWORD:-clusterpassword}
+        --appendonly yes
+        --appendfsync everysec
+        --maxmemory 256mb
+        --maxmemory-policy allkeys-lru
+        --loglevel notice
+
+  # One-shot cluster initializer — runs redis-cli --cluster create
+  redis-cluster-init:
+    image: redis:7.2-alpine
+    container_name: redis-cluster-init
+    networks:
+      - redis-cluster-net
+    depends_on:
+      - redis-node-1
+      - redis-node-2
+      - redis-node-3
+      - redis-node-4
+      - redis-node-5
+      - redis-node-6
+    command: >
+      sh -c "
+        sleep 5 &&
+        redis-cli -a ${REDIS_PASSWORD:-clusterpassword} --cluster create
+          redis-node-1:6379
+          redis-node-2:6379
+          redis-node-3:6379
+          redis-node-4:6379
+          redis-node-5:6379
+          redis-node-6:6379
+          --cluster-replicas 1
+          --cluster-yes
+      "
+    restart: "no"
+
+volumes:
+  redis-node-1-data:
+  redis-node-2-data:
+  redis-node-3-data:
+  redis-node-4-data:
+  redis-node-5-data:
+  redis-node-6-data:
+
+networks:
+  redis-cluster-net:
+    driver: bridge
+
+# --- Verify cluster ---
+# redis-cli -a clusterpassword -p 7001 cluster info
+# redis-cli -a clusterpassword -p 7001 cluster nodes
+#
+# --- Client connection (redis-py) ---
+# from redis.cluster import RedisCluster
+# rc = RedisCluster(
+#     startup_nodes=[{"host": "localhost", "port": "7001"}],
+#     decode_responses=True,
+#     password="clusterpassword",
+#     skip_full_coverage_check=True,
+# )
+# rc.set("foo", "bar")
+# rc.get("foo")
+#
+# --- Resharding example ---
+# redis-cli -a clusterpassword --cluster reshard localhost:7001 \
+#   --cluster-from <src-node-id> --cluster-to <dst-node-id> \
+#   --cluster-slots 100 --cluster-yes

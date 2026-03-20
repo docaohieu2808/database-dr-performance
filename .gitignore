@@ -1,0 +1,98 @@
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Secrets and credentials
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+credentials*.json
+*-credentials.json
+service-account*.json
+keyfile/
+secrets/
+
+# WAL-G / backup artifacts
+*.tar
+*.tar.gz
+*.tar.lz4
+*.tar.brotli
+wal_archive/
+backup/
+backups/
+
+# k6 / Locust results
+results/
+*.json
+!cloud-platforms/aws/ecs-task-definition.json
+!cloud-platforms/azure/azure-functions-config.json
+summary.json
+locustfile*.html
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+dist/
+*.egg-info/
+
+# Node.js
+node_modules/
+dist/
+.npm/
+
+# Go build artifacts
+*.exe
+*.test
+backup-controller
+vendor/
+
+# PostgreSQL data directories
+pgdata/
+pg_wal/
+pg_log/
+
+# MongoDB / Redis data
+data/
+dump/
+
+# Patroni runtime files
+patroni.dynamic.json
+patroni.lock
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Docker
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/
+/var/log/
+
+# Temporary
+tmp/
+temp/

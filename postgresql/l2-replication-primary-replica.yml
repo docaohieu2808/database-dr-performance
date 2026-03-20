@@ -1,0 +1,120 @@
+version: "3.9"
+
+# PostgreSQL Streaming Replication: 1 primary + 1 replica
+# Primary accepts reads/writes; replica is hot standby (read-only)
+# Uses built-in pg_basebackup for initial sync
+
+services:
+  postgres-primary:
+    image: postgres:16-alpine
+    container_name: pg-primary
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pguser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgpassword}
+      POSTGRES_DB: ${POSTGRES_DB:-appdb}
+      POSTGRES_REPLICATION_USER: replicator
+      POSTGRES_REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:-repl_secret}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-primary-data:/var/lib/postgresql/data
+      - ./replication/primary-init.sh:/docker-entrypoint-initdb.d/01-replication-init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pguser}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - pg-replication-net
+    command: >
+      postgres
+        -c wal_level=replica
+        -c max_wal_senders=5
+        -c max_replication_slots=5
+        -c wal_keep_size=1GB
+        -c hot_standby=on
+        -c synchronous_commit=on
+        -c shared_buffers=512MB
+        -c effective_cache_size=2GB
+        -c checkpoint_completion_target=0.9
+        -c log_replication_commands=on
+        -c archive_mode=on
+        -c archive_command='test ! -f /var/lib/postgresql/wal_archive/%f && cp %p /var/lib/postgresql/wal_archive/%f'
+
+  postgres-replica:
+    image: postgres:16-alpine
+    container_name: pg-replica
+    restart: unless-stopped
+    environment:
+      PGUSER: ${POSTGRES_USER:-pguser}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-pgpassword}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgpassword}
+      REPLICATION_USER: replicator
+      REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:-repl_secret}
+      PRIMARY_HOST: postgres-primary
+      PRIMARY_PORT: 5432
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5433:5432"
+    volumes:
+      - pg-replica-data:/var/lib/postgresql/data
+      - ./replication/replica-entrypoint.sh:/docker-entrypoint-replica.sh:ro
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    networks:
+      - pg-replication-net
+    entrypoint: ["/bin/sh", "/docker-entrypoint-replica.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pguser}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  # pgAdmin for monitoring both nodes
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    networks:
+      - pg-replication-net
+    depends_on:
+      - postgres-primary
+
+volumes:
+  pg-primary-data:
+  pg-replica-data:
+
+networks:
+  pg-replication-net:
+    driver: bridge
+
+# --- Supporting scripts (create these files beside this compose) ---
+# replication/primary-init.sh:
+#   #!/bin/bash
+#   set -e
+#   psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" <<-EOSQL
+#     CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD '$POSTGRES_REPLICATION_PASSWORD';
+#   EOSQL
+#   echo "host replication replicator all md5" >> "$PGDATA/pg_hba.conf"
+#   pg_ctl reload -D "$PGDATA"
+#
+# replication/replica-entrypoint.sh:
+#   #!/bin/sh
+#   set -e
+#   if [ ! -s "$PGDATA/PG_VERSION" ]; then
+#     until pg_isready -h "$PRIMARY_HOST" -p "$PRIMARY_PORT" -U "$REPLICATION_USER"; do sleep 2; done
+#     pg_basebackup -h "$PRIMARY_HOST" -p "$PRIMARY_PORT" -U "$REPLICATION_USER" \
+#       -D "$PGDATA" -Fp -Xs -P -R
+#     chmod 0700 "$PGDATA"
+#   fi
+#   exec postgres -c hot_standby=on -c max_standby_streaming_delay=30s

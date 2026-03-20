@@ -1,0 +1,321 @@
+# GKE cluster configuration — production-grade Autopilot + Standard modes
+# Apply via gcloud CLI or Terraform google_container_cluster resource
+#
+# Create (Standard):
+#   gcloud container clusters create myapp-production \
+#     --config-file gke-cluster-config.yaml
+#
+# Or use gcloud CLI flags directly (see bottom of file for reference commands)
+
+# ---------------------------------------------------------------------------
+# Cluster metadata
+# ---------------------------------------------------------------------------
+cluster:
+  name: myapp-production
+  project: my-gcp-project
+  location: us-central1          # regional cluster (HA across 3 zones)
+  description: "Production GKE cluster for MyApp"
+
+  # Kubernetes version
+  releaseChannel:
+    channel: REGULAR             # RAPID | REGULAR | STABLE
+
+  # ---------------------------------------------------------------------------
+  # Networking
+  # ---------------------------------------------------------------------------
+  network: projects/my-gcp-project/global/networks/myapp-vpc
+  subnetwork: projects/my-gcp-project/regions/us-central1/subnetworks/myapp-gke-subnet
+
+  networkConfig:
+    enableIntraNodeVisibility: true
+    datapathProvider: ADVANCED_DATAPATH    # eBPF dataplane (GKE Dataplane V2)
+    dnsConfig:
+      clusterDns: CLOUD_DNS
+      clusterDnsDomain: cluster.local
+      clusterDnsScope: CLUSTER_SCOPE
+
+  ipAllocationPolicy:
+    useIpAliases: true
+    clusterIpv4CidrBlock: "10.100.0.0/14"   # Pod CIDR
+    servicesIpv4CidrBlock: "10.104.0.0/20"  # Service CIDR
+    stackType: IPV4                          # IPV4 | IPV4_IPV6 (dual-stack)
+
+  privateClusterConfig:
+    enablePrivateNodes: true
+    enablePrivateEndpoint: false            # allow public kubectl access
+    masterIpv4CidrBlock: "172.16.0.0/28"
+
+  masterAuthorizedNetworksConfig:
+    enabled: true
+    cidrBlocks:
+      - displayName: office-vpn
+        cidrBlock: "203.0.113.0/24"        # replace with actual CIDR
+      - displayName: github-actions
+        cidrBlock: "0.0.0.0/0"             # restrict in production
+
+  # ---------------------------------------------------------------------------
+  # Security
+  # ---------------------------------------------------------------------------
+  workloadIdentityConfig:
+    workloadPool: "my-gcp-project.svc.id.goog"
+
+  binaryAuthorization:
+    evaluationMode: PROJECT_SINGLETON_POLICY_ENFORCE
+
+  shieldedNodes:
+    enabled: true
+
+  securityPostureConfig:
+    mode: BASIC
+    vulnerabilityMode: VULNERABILITY_BASIC
+
+  masterAuth:
+    clientCertificateConfig:
+      issueClientCertificate: false    # disable legacy cert auth
+
+  # ---------------------------------------------------------------------------
+  # Addons
+  # ---------------------------------------------------------------------------
+  addonsConfig:
+    httpLoadBalancing:
+      disabled: false                  # GKE Ingress controller
+    horizontalPodAutoscaling:
+      disabled: false
+    networkPolicyConfig:
+      disabled: false
+    gcePersistentDiskCsiDriverConfig:
+      enabled: true
+    gcsFuseCsiDriverConfig:
+      enabled: true
+    gcpFilestoreCsiDriverConfig:
+      enabled: true
+    configConnectorConfig:
+      enabled: true                    # manage GCP resources via K8s CRDs
+    dnsCacheConfig:
+      enabled: true                    # NodeLocal DNSCache
+    gkeDnsCache:
+      enabled: true
+
+  # ---------------------------------------------------------------------------
+  # Observability
+  # ---------------------------------------------------------------------------
+  loggingConfig:
+    componentConfig:
+      enableComponents:
+        - SYSTEM_COMPONENTS
+        - WORKLOADS
+        - APISERVER
+        - SCHEDULER
+        - CONTROLLER_MANAGER
+
+  monitoringConfig:
+    componentConfig:
+      enableComponents:
+        - SYSTEM_COMPONENTS
+        - APISERVER
+        - SCHEDULER
+        - CONTROLLER_MANAGER
+        - STORAGE
+        - HPA
+        - POD
+        - DAEMONSET
+        - DEPLOYMENT
+        - STATEFULSET
+    managedPrometheusConfig:
+      enabled: true                    # Google Managed Prometheus
+
+  # ---------------------------------------------------------------------------
+  # Node auto-provisioning (cluster autoscaler for node pools)
+  # ---------------------------------------------------------------------------
+  clusterAutoscaling:
+    enableNodeAutoprovisioning: true
+    autoscalingProfile: OPTIMIZE_UTILIZATION
+    resourceLimits:
+      - resourceType: cpu
+        minimum: 4
+        maximum: 256
+      - resourceType: memory
+        minimum: 16
+        maximum: 1024
+    autoprovisioningNodePoolDefaults:
+      serviceAccount: gke-node-sa@my-gcp-project.iam.gserviceaccount.com
+      oauthScopes:
+        - https://www.googleapis.com/auth/cloud-platform
+      management:
+        autoUpgrade: true
+        autoRepair: true
+      shieldedInstanceConfig:
+        enableSecureBoot: true
+        enableIntegrityMonitoring: true
+      diskSizeGb: 100
+      diskType: pd-ssd
+
+  # ---------------------------------------------------------------------------
+  # Node pools
+  # ---------------------------------------------------------------------------
+  nodePools:
+    # System node pool — runs cluster-critical addons
+    - name: system-pool
+      initialNodeCount: 1
+      autoscaling:
+        enabled: true
+        minNodeCount: 1
+        maxNodeCount: 3
+        locationPolicy: BALANCED
+      config:
+        machineType: e2-standard-4
+        diskSizeGb: 100
+        diskType: pd-ssd
+        imageType: COS_CONTAINERD
+        serviceAccount: gke-node-sa@my-gcp-project.iam.gserviceaccount.com
+        oauthScopes:
+          - https://www.googleapis.com/auth/cloud-platform
+        labels:
+          role: system
+          node-pool: system
+        taints:
+          - key: CriticalAddonsOnly
+            value: "true"
+            effect: NO_SCHEDULE
+        shieldedInstanceConfig:
+          enableSecureBoot: true
+          enableIntegrityMonitoring: true
+        workloadMetadataConfig:
+          mode: GKE_METADATA           # enable Workload Identity
+      management:
+        autoUpgrade: true
+        autoRepair: true
+      upgradeSettings:
+        strategy: SURGE
+        maxSurge: 1
+        maxUnavailable: 0
+
+    # Application node pool — stateless workloads
+    - name: app-pool
+      initialNodeCount: 2
+      autoscaling:
+        enabled: true
+        minNodeCount: 2
+        maxNodeCount: 20
+        locationPolicy: BALANCED
+      config:
+        machineType: n2-standard-4
+        diskSizeGb: 100
+        diskType: pd-ssd
+        imageType: COS_CONTAINERD
+        serviceAccount: gke-node-sa@my-gcp-project.iam.gserviceaccount.com
+        oauthScopes:
+          - https://www.googleapis.com/auth/cloud-platform
+        labels:
+          role: application
+          node-pool: app
+        shieldedInstanceConfig:
+          enableSecureBoot: true
+          enableIntegrityMonitoring: true
+        workloadMetadataConfig:
+          mode: GKE_METADATA
+      management:
+        autoUpgrade: true
+        autoRepair: true
+      upgradeSettings:
+        strategy: SURGE
+        maxSurge: 2
+        maxUnavailable: 0
+
+    # Database node pool — stateful workloads with SSD local storage
+    - name: db-pool
+      initialNodeCount: 1
+      autoscaling:
+        enabled: true
+        minNodeCount: 1
+        maxNodeCount: 6
+        locationPolicy: BALANCED
+      config:
+        machineType: n2-highmem-8
+        diskSizeGb: 500
+        diskType: pd-ssd
+        imageType: COS_CONTAINERD
+        localSsdCount: 1             # NVMe local SSD for low-latency storage
+        serviceAccount: gke-node-sa@my-gcp-project.iam.gserviceaccount.com
+        oauthScopes:
+          - https://www.googleapis.com/auth/cloud-platform
+        labels:
+          role: database
+          node-pool: db
+        taints:
+          - key: workload
+            value: database
+            effect: NO_SCHEDULE
+        shieldedInstanceConfig:
+          enableSecureBoot: true
+          enableIntegrityMonitoring: true
+        workloadMetadataConfig:
+          mode: GKE_METADATA
+      management:
+        autoUpgrade: true
+        autoRepair: true
+      upgradeSettings:
+        strategy: SURGE
+        maxSurge: 1
+        maxUnavailable: 0
+
+    # Spot node pool — preemptible/spot for batch and non-critical workloads
+    - name: spot-pool
+      initialNodeCount: 0
+      autoscaling:
+        enabled: true
+        minNodeCount: 0
+        maxNodeCount: 30
+        locationPolicy: ANY
+      config:
+        machineType: n2-standard-8
+        diskSizeGb: 100
+        diskType: pd-standard
+        imageType: COS_CONTAINERD
+        spot: true                   # Spot VMs (replaces preemptible)
+        serviceAccount: gke-node-sa@my-gcp-project.iam.gserviceaccount.com
+        oauthScopes:
+          - https://www.googleapis.com/auth/cloud-platform
+        labels:
+          role: spot
+          node-pool: spot
+        taints:
+          - key: cloud.google.com/gke-spot
+            value: "true"
+            effect: NO_SCHEDULE
+        workloadMetadataConfig:
+          mode: GKE_METADATA
+      management:
+        autoUpgrade: true
+        autoRepair: true
+
+# ---------------------------------------------------------------------------
+# Reference: gcloud CLI equivalent commands
+# ---------------------------------------------------------------------------
+# gcloud container clusters create myapp-production \
+#   --region us-central1 \
+#   --release-channel regular \
+#   --network myapp-vpc \
+#   --subnetwork myapp-gke-subnet \
+#   --enable-ip-alias \
+#   --cluster-ipv4-cidr 10.100.0.0/14 \
+#   --services-ipv4-cidr 10.104.0.0/20 \
+#   --enable-private-nodes \
+#   --master-ipv4-cidr 172.16.0.0/28 \
+#   --enable-master-authorized-networks \
+#   --master-authorized-networks 203.0.113.0/24 \
+#   --workload-pool my-gcp-project.svc.id.goog \
+#   --enable-shielded-nodes \
+#   --dataplane-v2 \
+#   --enable-managed-prometheus \
+#   --enable-autoprovisioning \
+#   --max-cpu 256 --max-memory 1024 \
+#   --autoprovisioning-scopes https://www.googleapis.com/auth/cloud-platform \
+#   --num-nodes 2 \
+#   --machine-type n2-standard-4 \
+#   --disk-type pd-ssd \
+#   --disk-size 100 \
+#   --image-type COS_CONTAINERD \
+#   --enable-autorepair \
+#   --enable-autoupgrade \
+#   --project my-gcp-project

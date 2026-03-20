@@ -1,0 +1,150 @@
+# Velero Helm chart values for Kubernetes backup installation
+# Chart: vmware-tanzu/velero
+# Docs: https://github.com/vmware-tanzu/velero/tree/main/charts/velero
+#
+# Install:
+#   helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts
+#   helm repo update
+#   helm install velero vmware-tanzu/velero \
+#     --namespace velero --create-namespace \
+#     --values l1-velero-install-helm-values.yaml
+
+image:
+  repository: velero/velero
+  tag: v1.13.0
+  pullPolicy: IfNotPresent
+
+# Number of Velero server replicas
+replicaCount: 1
+
+# Resources for the Velero server pod
+resources:
+  requests:
+    cpu: 500m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+# Velero feature flags
+initContainers:
+  - name: velero-plugin-for-aws
+    image: velero/velero-plugin-for-aws:v1.9.0
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+      - mountPath: /target
+        name: plugins
+
+# Cloud provider configuration
+configuration:
+  # Backup storage location (BSL)
+  backupStorageLocation:
+    - name: default
+      provider: aws
+      bucket: my-velero-backups
+      prefix: velero
+      default: true
+      config:
+        region: us-east-1
+        # For S3-compatible (MinIO):
+        # s3ForcePathStyle: "true"
+        # s3Url: http://minio.minio.svc.cluster.local:9000
+        kmsKeyId: ""           # Optional: AWS KMS key ARN for SSE
+        serverSideEncryption: AES256
+
+  # Volume snapshot location (VSL)
+  volumeSnapshotLocation:
+    - name: default
+      provider: aws
+      config:
+        region: us-east-1
+
+  # Default backup TTL
+  defaultBackupTTL: 720h   # 30 days
+
+  # Default volume snapshot strategy
+  defaultSnapshotMoveData: false
+
+  # Log level: info, debug, warning, error, fatal, panic
+  logLevel: info
+  logFormat: json
+
+  # Namespace to watch (empty = all namespaces)
+  defaultVolumesToFsBackup: false
+
+# AWS credentials secret (create separately)
+# kubectl create secret generic velero-credentials \
+#   --namespace velero \
+#   --from-file=cloud=./credentials-velero
+credentials:
+  useSecret: true
+  existingSecret: velero-credentials
+  # secretContents:
+  #   cloud: |
+  #     [default]
+  #     aws_access_key_id=AKIAIOSFODNN7EXAMPLE
+  #     aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+
+# Service account with IRSA (IAM Roles for Service Accounts) annotation
+serviceAccount:
+  server:
+    create: true
+    name: velero
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/VeleroRole
+
+# Node agent (formerly restic) for file-system level backup
+nodeAgent:
+  podVolumePath: /var/lib/kubelet/pods
+  privileged: false
+  tolerations: []
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+# Metrics / Prometheus
+metrics:
+  enabled: true
+  scrapeInterval: 30s
+  scrapeTimeout: 10s
+  serviceMonitor:
+    enabled: false         # set true if Prometheus Operator is installed
+    additionalLabels: {}
+  prometheusRule:
+    enabled: false
+
+# Security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  fsGroup: 65534
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: false
+
+# Tolerations / affinity for dedicated backup nodes
+tolerations: []
+affinity: {}
+nodeSelector: {}
+
+# Upgrade / install CRDs
+upgradeCRDs: true
+
+# Cleanup old CRDs on uninstall
+cleanUpCRDs: false
+
+# Extra environment variables for Velero server
+extraEnvVars: {}
+#  GOOGLE_APPLICATION_CREDENTIALS: /credentials/gcp-credentials.json
+
+# Extra volumes (e.g. for GCP service account)
+extraVolumes: []
+extraVolumeMounts: []

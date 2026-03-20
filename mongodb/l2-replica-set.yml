@@ -1,0 +1,185 @@
+version: "3.9"
+
+# MongoDB 3-node Replica Set
+# rs0: mongo1 (primary), mongo2, mongo3 (secondaries)
+# Automatic failover — primary election via Raft-like consensus
+# Read preference: primaryPreferred, secondary, nearest
+
+x-mongo-common: &mongo-common
+  image: mongo:7.0
+  restart: unless-stopped
+  networks:
+    - mongo-rs-net
+  ulimits:
+    nproc: 64000
+    nofile:
+      soft: 64000
+      hard: 64000
+
+services:
+  mongo1:
+    <<: *mongo-common
+    container_name: mongo1
+    hostname: mongo1
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo1-data:/data/db
+      - mongo1-config:/data/configdb
+      - ./keyfile/mongo-keyfile:/etc/mongo-keyfile:ro
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-adminpassword}
+    command: >
+      mongod
+        --replSet rs0
+        --bind_ip_all
+        --auth
+        --keyFile /etc/mongo-keyfile
+        --wiredTigerCacheSizeGB 1
+        --oplogSize 1024
+        --slowms 100
+    healthcheck:
+      test: >
+        mongosh --quiet --eval "db.adminCommand('ping').ok"
+        --username ${MONGO_ROOT_USER:-admin}
+        --password ${MONGO_ROOT_PASSWORD:-adminpassword}
+        --authenticationDatabase admin
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  mongo2:
+    <<: *mongo-common
+    container_name: mongo2
+    hostname: mongo2
+    ports:
+      - "27018:27017"
+    volumes:
+      - mongo2-data:/data/db
+      - mongo2-config:/data/configdb
+      - ./keyfile/mongo-keyfile:/etc/mongo-keyfile:ro
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-adminpassword}
+    command: >
+      mongod
+        --replSet rs0
+        --bind_ip_all
+        --auth
+        --keyFile /etc/mongo-keyfile
+        --wiredTigerCacheSizeGB 1
+        --oplogSize 1024
+        --slowms 100
+    healthcheck:
+      test: >
+        mongosh --quiet --eval "db.adminCommand('ping').ok"
+        --username ${MONGO_ROOT_USER:-admin}
+        --password ${MONGO_ROOT_PASSWORD:-adminpassword}
+        --authenticationDatabase admin
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  mongo3:
+    <<: *mongo-common
+    container_name: mongo3
+    hostname: mongo3
+    ports:
+      - "27019:27017"
+    volumes:
+      - mongo3-data:/data/db
+      - mongo3-config:/data/configdb
+      - ./keyfile/mongo-keyfile:/etc/mongo-keyfile:ro
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-adminpassword}
+    command: >
+      mongod
+        --replSet rs0
+        --bind_ip_all
+        --auth
+        --keyFile /etc/mongo-keyfile
+        --wiredTigerCacheSizeGB 1
+        --oplogSize 1024
+        --slowms 100
+    healthcheck:
+      test: >
+        mongosh --quiet --eval "db.adminCommand('ping').ok"
+        --username ${MONGO_ROOT_USER:-admin}
+        --password ${MONGO_ROOT_PASSWORD:-adminpassword}
+        --authenticationDatabase admin
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  # One-shot replica set initializer
+  mongo-rs-init:
+    image: mongo:7.0
+    container_name: mongo-rs-init
+    networks:
+      - mongo-rs-net
+    depends_on:
+      mongo1:
+        condition: service_healthy
+      mongo2:
+        condition: service_healthy
+      mongo3:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: >
+      mongosh --host mongo1 --quiet
+        --username ${MONGO_ROOT_USER:-admin}
+        --password ${MONGO_ROOT_PASSWORD:-adminpassword}
+        --authenticationDatabase admin
+        --eval "
+          rs.initiate({
+            _id: 'rs0',
+            members: [
+              { _id: 0, host: 'mongo1:27017', priority: 2 },
+              { _id: 1, host: 'mongo2:27017', priority: 1 },
+              { _id: 2, host: 'mongo3:27017', priority: 1 }
+            ]
+          });
+          // Wait for primary election
+          sleep(3000);
+          rs.status();
+          // Create app user on primary
+          db.getSiblingDB('appdb').createUser({
+            user: 'appuser',
+            pwd: '${MONGO_APP_PASSWORD:-apppassword}',
+            roles: [{ role: 'readWrite', db: 'appdb' }]
+          });
+        "
+
+volumes:
+  mongo1-data:
+  mongo1-config:
+  mongo2-data:
+  mongo2-config:
+  mongo3-data:
+  mongo3-config:
+
+networks:
+  mongo-rs-net:
+    driver: bridge
+
+# --- Generate keyfile (run once before starting) ---
+# mkdir -p keyfile
+# openssl rand -base64 756 > keyfile/mongo-keyfile
+# chmod 400 keyfile/mongo-keyfile
+# chown 999:999 keyfile/mongo-keyfile   # MongoDB container UID
+#
+# --- Verify replica set ---
+# mongosh "mongodb://admin:adminpassword@localhost:27017,localhost:27018,localhost:27019/admin?replicaSet=rs0"
+# rs.status()
+# rs.conf()
+#
+# --- Connection string (app) ---
+# mongodb://appuser:apppassword@mongo1:27017,mongo2:27017,mongo3:27017/appdb?replicaSet=rs0&readPreference=secondaryPreferred
+#
+# --- Simulate failover ---
+# mongosh admin -u admin -p adminpassword --eval "rs.stepDown()"

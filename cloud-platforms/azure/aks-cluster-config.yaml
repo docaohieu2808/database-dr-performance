@@ -1,0 +1,304 @@
+# AKS (Azure Kubernetes Service) cluster configuration
+# Production-grade: system + user node pools, RBAC, managed identity, monitoring
+# Docs: https://learn.microsoft.com/en-us/azure/aks/
+#
+# Deploy:
+#   az group create --name myapp-rg --location eastus
+#   az aks create --resource-group myapp-rg --name myapp-production \
+#     --generate-ssh-keys --enable-managed-identity \
+#     ... (see reference commands at bottom)
+#
+# Or via Bicep/ARM/Terraform using this file as reference spec
+
+apiVersion: 2024-02-01   # AKS API version reference
+kind: AKSCluster
+
+metadata:
+  name: myapp-production
+  resourceGroup: myapp-rg
+  location: eastus
+  tags:
+    environment: production
+    team: platform
+    cost-center: engineering
+    managed-by: azure-cli
+
+spec:
+  # ---------------------------------------------------------------------------
+  # Kubernetes version
+  # ---------------------------------------------------------------------------
+  kubernetesVersion: "1.29"
+
+  # ---------------------------------------------------------------------------
+  # DNS prefix for FQDN
+  # ---------------------------------------------------------------------------
+  dnsPrefix: myapp-production
+
+  # ---------------------------------------------------------------------------
+  # Identity (managed identity — no service principal needed)
+  # ---------------------------------------------------------------------------
+  identity:
+    type: SystemAssigned
+
+  # ---------------------------------------------------------------------------
+  # RBAC + Azure AD integration
+  # ---------------------------------------------------------------------------
+  aadProfile:
+    managed: true
+    enableAzureRBAC: true
+    adminGroupObjectIDs:
+      - "00000000-0000-0000-0000-000000000001"   # replace with actual AAD group ID
+    tenantID: "00000000-0000-0000-0000-000000000002"   # replace with tenant ID
+
+  # ---------------------------------------------------------------------------
+  # Networking
+  # ---------------------------------------------------------------------------
+  networkProfile:
+    networkPlugin: azure             # azure (CNI) | kubenet | none
+    networkPluginMode: overlay       # overlay mode for better IP efficiency
+    networkPolicy: azure             # azure | calico | cilium
+    loadBalancerSku: standard
+    outboundType: loadBalancer       # loadBalancer | userDefinedRouting | managedNATGateway
+    serviceCidr: "10.96.0.0/16"
+    dnsServiceIP: "10.96.0.10"
+    podCidr: "10.244.0.0/14"        # used when networkPlugin=kubenet or overlay
+    ipFamilies:
+      - IPv4
+
+  # ---------------------------------------------------------------------------
+  # API server access
+  # ---------------------------------------------------------------------------
+  apiServerAccessProfile:
+    enablePrivateCluster: false       # set true for private cluster
+    authorizedIPRanges:
+      - "203.0.113.0/24"            # replace with office/VPN CIDRs
+      - "0.0.0.0/0"                 # restrict in production
+
+  # ---------------------------------------------------------------------------
+  # Add-ons
+  # ---------------------------------------------------------------------------
+  addonProfiles:
+    # Azure Monitor (Container Insights)
+    omsAgent:
+      enabled: true
+      config:
+        logAnalyticsWorkspaceResourceID: /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myapp-rg/providers/Microsoft.OperationalInsights/workspaces/myapp-logs
+
+    # Azure Policy for Kubernetes
+    azurePolicy:
+      enabled: true
+
+    # Key Vault Secrets Provider (CSI driver)
+    azureKeyvaultSecretsProvider:
+      enabled: true
+      config:
+        enableSecretRotation: "true"
+        rotationPollInterval: "2m"
+
+    # HTTP application routing (dev/test only — use nginx in production)
+    httpApplicationRouting:
+      enabled: false
+
+    # Open Service Mesh
+    openServiceMesh:
+      enabled: false
+
+  # ---------------------------------------------------------------------------
+  # Node pools
+  # ---------------------------------------------------------------------------
+  agentPoolProfiles:
+    # System node pool — runs kube-system workloads
+    - name: system
+      mode: System                   # System | User
+      vmSize: Standard_D4s_v5
+      osDiskSizeGB: 128
+      osDiskType: Managed            # Managed | Ephemeral
+      osType: Linux
+      osSKU: AzureLinux              # AzureLinux | Ubuntu
+      count: 2
+      minCount: 2
+      maxCount: 5
+      enableAutoScaling: true
+      availabilityZones: ["1", "2", "3"]
+      nodeTaints:
+        - "CriticalAddonsOnly=true:NoSchedule"
+      nodeLabels:
+        role: system
+        node-pool: system
+      maxPods: 110
+      upgradeSettings:
+        maxSurge: "1"
+      kubeletConfig:
+        cpuManagerPolicy: static
+        topologyManagerPolicy: best-effort
+      linuxOSConfig:
+        sysctls:
+          netCoreWmemMax: 16777216
+          netIpv4TcpMaxSynBacklog: 8192
+          netCoreNetdevMaxBacklog: 16384
+          vmMaxMapCount: 262144
+
+    # Application node pool — stateless workloads
+    - name: apppool
+      mode: User
+      vmSize: Standard_D8s_v5
+      osDiskSizeGB: 128
+      osDiskType: Ephemeral          # Ephemeral for better I/O performance
+      osType: Linux
+      osSKU: AzureLinux
+      count: 2
+      minCount: 2
+      maxCount: 30
+      enableAutoScaling: true
+      availabilityZones: ["1", "2", "3"]
+      nodeLabels:
+        role: application
+        node-pool: app
+      maxPods: 110
+      upgradeSettings:
+        maxSurge: "2"
+      linuxOSConfig:
+        sysctls:
+          netCoreWmemMax: 16777216
+          vmMaxMapCount: 262144
+
+    # Database node pool — stateful, memory-optimized
+    - name: dbpool
+      mode: User
+      vmSize: Standard_E8s_v5       # memory-optimized
+      osDiskSizeGB: 512
+      osDiskType: Managed
+      osType: Linux
+      osSKU: AzureLinux
+      count: 1
+      minCount: 1
+      maxCount: 6
+      enableAutoScaling: true
+      availabilityZones: ["1", "2"]
+      nodeTaints:
+        - "workload=database:NoSchedule"
+      nodeLabels:
+        role: database
+        node-pool: db
+      maxPods: 50
+      upgradeSettings:
+        maxSurge: "1"
+
+    # Spot node pool — interruptible workloads
+    - name: spotpool
+      mode: User
+      vmSize: Standard_D8s_v5
+      scaleSetPriority: Spot
+      scaleSetEvictionPolicy: Delete
+      spotMaxPrice: -1               # -1 = pay up to on-demand price
+      osDiskSizeGB: 100
+      osDiskType: Ephemeral
+      osType: Linux
+      osSKU: AzureLinux
+      count: 0
+      minCount: 0
+      maxCount: 20
+      enableAutoScaling: true
+      nodeTaints:
+        - "kubernetes.azure.com/scalesetpriority=spot:NoSchedule"
+      nodeLabels:
+        role: spot
+        node-pool: spot
+        kubernetes.azure.com/scalesetpriority: spot
+      maxPods: 110
+
+  # ---------------------------------------------------------------------------
+  # Auto-upgrade channel
+  # ---------------------------------------------------------------------------
+  autoUpgradeProfile:
+    upgradeChannel: stable           # none | patch | stable | rapid | node-image
+    nodeOSUpgradeChannel: NodeImage
+
+  # ---------------------------------------------------------------------------
+  # Maintenance window (avoid upgrades during business hours)
+  # ---------------------------------------------------------------------------
+  maintenanceConfiguration:
+    maintenanceWindow:
+      schedule:
+        weekly:
+          intervalWeeks: 1
+          dayOfWeek: Sunday
+          startTime: "02:00"
+      duration: "PT4H"
+      utcOffset: "+00:00"
+
+  # ---------------------------------------------------------------------------
+  # Security profile
+  # ---------------------------------------------------------------------------
+  securityProfile:
+    workloadIdentity:
+      enabled: true                  # enable pod managed identity (federated credentials)
+    imageCleaner:
+      enabled: true
+      intervalHours: 48
+    defender:
+      logAnalyticsWorkspaceResourceId: /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myapp-rg/providers/Microsoft.OperationalInsights/workspaces/myapp-logs
+      securityMonitoring:
+        enabled: true
+
+  # ---------------------------------------------------------------------------
+  # OIDC issuer (for workload identity / federated credentials)
+  # ---------------------------------------------------------------------------
+  oidcIssuerProfile:
+    enabled: true
+
+  # ---------------------------------------------------------------------------
+  # Monitoring
+  # ---------------------------------------------------------------------------
+  azureMonitorProfile:
+    metrics:
+      enabled: true
+      kubeStateMetrics:
+        metricLabelsAllowlist: ""
+        metricAnnotationsAllowList: ""
+
+  # ---------------------------------------------------------------------------
+  # Storage profiles
+  # ---------------------------------------------------------------------------
+  storageProfile:
+    diskCSIDriver:
+      enabled: true
+      version: v1
+    fileCSIDriver:
+      enabled: true
+    blobCSIDriver:
+      enabled: true
+    snapshotController:
+      enabled: true
+
+# ---------------------------------------------------------------------------
+# Reference: az aks create command
+# ---------------------------------------------------------------------------
+# az aks create \
+#   --resource-group myapp-rg \
+#   --name myapp-production \
+#   --location eastus \
+#   --kubernetes-version 1.29 \
+#   --node-count 2 \
+#   --node-vm-size Standard_D8s_v5 \
+#   --zones 1 2 3 \
+#   --enable-managed-identity \
+#   --enable-aad \
+#   --enable-azure-rbac \
+#   --aad-admin-group-object-ids 00000000-0000-0000-0000-000000000001 \
+#   --network-plugin azure \
+#   --network-plugin-mode overlay \
+#   --network-policy azure \
+#   --service-cidr 10.96.0.0/16 \
+#   --dns-service-ip 10.96.0.10 \
+#   --enable-addons monitoring,azure-keyvault-secrets-provider,azure-policy \
+#   --workspace-resource-id /subscriptions/.../workspaces/myapp-logs \
+#   --enable-secret-rotation \
+#   --enable-oidc-issuer \
+#   --enable-workload-identity \
+#   --enable-cluster-autoscaler \
+#   --min-count 2 --max-count 30 \
+#   --auto-upgrade-channel stable \
+#   --node-os-upgrade-channel NodeImage \
+#   --os-sku AzureLinux \
+#   --generate-ssh-keys

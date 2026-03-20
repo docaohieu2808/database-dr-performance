@@ -1,0 +1,145 @@
+{
+  "family": "myapp-api",
+  "taskRoleArn": "arn:aws:iam::123456789012:role/MyAppTaskRole",
+  "executionRoleArn": "arn:aws:iam::123456789012:role/MyAppTaskExecutionRole",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "containerDefinitions": [
+    {
+      "name": "api",
+      "image": "123456789012.dkr.ecr.us-east-1.amazonaws.com/myapp-api:latest",
+      "essential": true,
+      "cpu": 896,
+      "memory": 1792,
+      "memoryReservation": 1024,
+      "portMappings": [
+        {
+          "containerPort": 3000,
+          "hostPort": 3000,
+          "protocol": "tcp",
+          "name": "api-http",
+          "appProtocol": "http"
+        }
+      ],
+      "environment": [
+        { "name": "NODE_ENV",       "value": "production" },
+        { "name": "PORT",           "value": "3000" },
+        { "name": "LOG_LEVEL",      "value": "info" },
+        { "name": "AWS_REGION",     "value": "us-east-1" }
+      ],
+      "secrets": [
+        {
+          "name": "DATABASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:myapp/production/database-url"
+        },
+        {
+          "name": "REDIS_URL",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:myapp/production/redis-url"
+        },
+        {
+          "name": "JWT_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:myapp/production/jwt-secret"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/myapp-api",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "api",
+          "awslogs-create-group": "true",
+          "mode": "non-blocking",
+          "max-buffer-size": "25m"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:3000/healthz || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      },
+      "readonlyRootFilesystem": false,
+      "privileged": false,
+      "user": "1000:1000",
+      "ulimits": [
+        { "name": "nofile", "softLimit": 65536, "hardLimit": 65536 }
+      ],
+      "linuxParameters": {
+        "initProcessEnabled": true,
+        "capabilities": {
+          "drop": ["ALL"],
+          "add": ["NET_BIND_SERVICE"]
+        }
+      },
+      "dependsOn": [
+        { "containerName": "datadog-agent", "condition": "START" }
+      ],
+      "stopTimeout": 30
+    },
+    {
+      "name": "datadog-agent",
+      "image": "public.ecr.aws/datadog/agent:7",
+      "essential": false,
+      "cpu": 128,
+      "memory": 256,
+      "memoryReservation": 128,
+      "portMappings": [
+        { "containerPort": 8125, "hostPort": 8125, "protocol": "udp" },
+        { "containerPort": 8126, "hostPort": 8126, "protocol": "tcp" }
+      ],
+      "environment": [
+        { "name": "DD_SITE",                    "value": "datadoghq.com" },
+        { "name": "DD_APM_ENABLED",             "value": "true" },
+        { "name": "DD_APM_NON_LOCAL_TRAFFIC",   "value": "true" },
+        { "name": "DD_DOGSTATSD_NON_LOCAL_TRAFFIC", "value": "true" },
+        { "name": "DD_LOGS_ENABLED",            "value": "true" },
+        { "name": "DD_PROCESS_AGENT_ENABLED",   "value": "true" },
+        { "name": "ECS_FARGATE",                "value": "true" }
+      ],
+      "secrets": [
+        {
+          "name": "DD_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:myapp/production/datadog-api-key"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/myapp-api",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "datadog-agent"
+        }
+      }
+    },
+    {
+      "name": "aws-otel-collector",
+      "image": "public.ecr.aws/aws-observability/aws-otel-collector:v0.36.0",
+      "essential": false,
+      "cpu": 64,
+      "memory": 128,
+      "command": ["--config=/etc/ecs/ecs-default-config.yaml"],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/myapp-api",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "otel-collector"
+        }
+      }
+    }
+  ],
+  "volumes": [],
+  "placementConstraints": [],
+  "tags": [
+    { "key": "environment", "value": "production" },
+    { "key": "service",     "value": "myapp-api" },
+    { "key": "managed-by",  "value": "terraform" }
+  ]
+}

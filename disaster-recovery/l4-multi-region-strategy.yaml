@@ -1,0 +1,301 @@
+# Multi-region failover strategy configuration
+# Covers: active-passive DR, Route53 health checks, RDS cross-region replication,
+#         EKS multi-region, and runbook references
+# This is a declarative reference config — apply components individually per section
+
+---
+# =============================================================================
+# Section 1: AWS Route53 Health Check + DNS Failover
+# =============================================================================
+# Primary region: us-east-1 | DR region: eu-west-1
+# Failover: Route53 health check triggers DNS switch within ~60s
+
+# Health check for primary endpoint
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: route53-failover-config
+  namespace: dr-system
+  annotations:
+    description: "Route53 health check and failover DNS configuration reference"
+data:
+  primary-region: us-east-1
+  dr-region: eu-west-1
+  rto-target: "15m"     # Recovery Time Objective
+  rpo-target: "5m"      # Recovery Point Objective
+  failover-type: active-passive
+
+  # Route53 health check settings (apply via AWS CLI or Terraform)
+  health-check-config: |
+    Type: HTTPS
+    ResourcePath: /healthz
+    FullyQualifiedDomainName: api.example.com
+    Port: 443
+    RequestInterval: 10
+    FailureThreshold: 3
+    MeasureLatency: true
+    Regions:
+      - us-east-1
+      - eu-west-1
+      - ap-southeast-1
+
+  # DNS records (Terraform resource reference)
+  dns-failover-records: |
+    # Primary record (us-east-1)
+    aws_route53_record.primary:
+      zone_id: Z1234567890
+      name: api.example.com
+      type: A
+      set_identifier: primary
+      failover_routing_policy:
+        type: PRIMARY
+      health_check_id: <primary-health-check-id>
+      alias:
+        name: <primary-alb-dns>
+        zone_id: <alb-zone-id>
+        evaluate_target_health: true
+
+    # Secondary record (eu-west-1)
+    aws_route53_record.secondary:
+      zone_id: Z1234567890
+      name: api.example.com
+      type: A
+      set_identifier: secondary
+      failover_routing_policy:
+        type: SECONDARY
+      alias:
+        name: <dr-alb-dns>
+        zone_id: <dr-alb-zone-id>
+        evaluate_target_health: true
+
+---
+# =============================================================================
+# Section 2: Kubernetes DR Namespace + Resource Quotas
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dr-system
+  labels:
+    role: disaster-recovery
+    region: multi-region
+
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: dr-system-quota
+  namespace: dr-system
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    persistentvolumeclaims: "10"
+
+---
+# =============================================================================
+# Section 3: CronJob — cross-region data sync verification
+# =============================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dr-sync-verification
+  namespace: dr-system
+  labels:
+    app: dr-verification
+spec:
+  schedule: "*/15 * * * *"    # every 15 minutes
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 300
+      template:
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: dr-verification-sa
+          containers:
+            - name: dr-verifier
+              image: amazon/aws-cli:2.15.0
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+
+                  PRIMARY_REGION="${PRIMARY_REGION:-us-east-1}"
+                  DR_REGION="${DR_REGION:-eu-west-1}"
+                  BUCKET="${DR_BUCKET:-my-app-backups}"
+                  MAX_LAG_SECONDS="${MAX_LAG_SECONDS:-300}"
+
+                  echo "[$(date -u +%FT%TZ)] Verifying DR sync..."
+
+                  # Check S3 replication lag
+                  PRIMARY_LATEST=$(aws s3api list-objects-v2 \
+                    --bucket "$BUCKET" \
+                    --region "$PRIMARY_REGION" \
+                    --query 'sort_by(Contents, &LastModified)[-1].LastModified' \
+                    --output text)
+
+                  DR_LATEST=$(aws s3api list-objects-v2 \
+                    --bucket "${BUCKET}-dr" \
+                    --region "$DR_REGION" \
+                    --query 'sort_by(Contents, &LastModified)[-1].LastModified' \
+                    --output text)
+
+                  echo "Primary latest object: $PRIMARY_LATEST"
+                  echo "DR latest object:      $DR_LATEST"
+
+                  # Check RDS replica lag
+                  RDS_LAG=$(aws cloudwatch get-metric-statistics \
+                    --namespace AWS/RDS \
+                    --metric-name ReplicaLag \
+                    --dimensions Name=DBInstanceIdentifier,Value="${RDS_DR_INSTANCE:-myapp-db-dr}" \
+                    --start-time "$(date -u -d '5 minutes ago' +%FT%TZ 2>/dev/null || date -u -v-5M +%FT%TZ)" \
+                    --end-time "$(date -u +%FT%TZ)" \
+                    --period 300 \
+                    --statistics Average \
+                    --region "$DR_REGION" \
+                    --query 'Datapoints[0].Average' \
+                    --output text 2>/dev/null || echo "N/A")
+
+                  echo "RDS replica lag: ${RDS_LAG}s"
+
+                  if [[ "$RDS_LAG" != "N/A" ]] && \
+                     (( $(echo "$RDS_LAG > $MAX_LAG_SECONDS" | bc -l) )); then
+                    echo "ALERT: RDS replica lag ${RDS_LAG}s exceeds threshold ${MAX_LAG_SECONDS}s"
+                    exit 1
+                  fi
+
+                  echo "DR sync verification PASSED"
+              env:
+                - name: PRIMARY_REGION
+                  value: us-east-1
+                - name: DR_REGION
+                  value: eu-west-1
+                - name: DR_BUCKET
+                  value: my-app-backups
+                - name: MAX_LAG_SECONDS
+                  value: "300"
+                - name: RDS_DR_INSTANCE
+                  value: myapp-db-dr
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 200m
+                  memory: 256Mi
+
+---
+# =============================================================================
+# Section 4: ConfigMap — DR runbook and failover procedure
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dr-failover-runbook
+  namespace: dr-system
+data:
+  rto: "15 minutes"
+  rpo: "5 minutes"
+
+  failover-decision-criteria: |
+    Trigger failover when ANY of:
+    - Primary region health check fails 3 consecutive checks (30s)
+    - Primary EKS cluster unreachable > 5 minutes
+    - Primary RDS instance unavailable > 5 minutes
+    - Manual declaration by on-call engineer
+
+  failover-steps: |
+    STEP 1 — ASSESS (0-3 min)
+      [ ] Confirm primary region outage (not just network blip)
+      [ ] Check AWS Service Health Dashboard
+      [ ] Alert stakeholders via PagerDuty/Slack
+
+    STEP 2 — PROMOTE DR DATABASE (3-8 min)
+      [ ] Promote RDS read replica in eu-west-1:
+          aws rds promote-read-replica \
+            --db-instance-identifier myapp-db-dr \
+            --region eu-west-1
+      [ ] Wait for promotion to complete (~5min):
+          aws rds wait db-instance-available \
+            --db-instance-identifier myapp-db-dr \
+            --region eu-west-1
+      [ ] Update connection string secret in DR cluster:
+          kubectl -n production create secret generic db-credentials \
+            --from-literal=host=myapp-db-dr.xxxx.eu-west-1.rds.amazonaws.com \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+    STEP 3 — SCALE UP DR WORKLOADS (8-12 min)
+      [ ] Scale up deployments in DR EKS cluster:
+          kubectl scale deployment --all --replicas=3 -n production \
+            --context arn:aws:eks:eu-west-1:123456789012:cluster/myapp-dr
+      [ ] Verify pod readiness:
+          kubectl rollout status deployment -n production --timeout=300s
+
+    STEP 4 — SWITCH DNS (12-15 min)
+      [ ] Disable primary health check (forces Route53 to secondary):
+          aws route53 update-health-check \
+            --health-check-id <primary-hc-id> \
+            --disabled \
+            --region us-east-1
+      [ ] Verify DNS propagation:
+          dig +short api.example.com  # should return DR ALB IP
+
+    STEP 5 — VALIDATE (15+ min)
+      [ ] Run smoke tests against DR endpoint
+      [ ] Monitor error rates in DR region
+      [ ] Update incident status page
+
+  failback-steps: |
+    FAILBACK (when primary region recovers)
+    1. Restore primary database from DR (if data diverged)
+    2. Re-establish replication: DR → Primary
+    3. Wait for primary to catch up (check ReplicaLag = 0)
+    4. Re-enable Route53 primary health check
+    5. Scale down DR workloads to standby (replicas=1 or 0)
+    6. Verify primary handles full traffic
+    7. Post-incident review within 48h
+
+---
+# =============================================================================
+# Section 5: ServiceAccount for DR verification job
+# =============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dr-verification-sa
+  namespace: dr-system
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/DRVerificationRole
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dr-verification-role
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces", "pods", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dr-verification-binding
+subjects:
+  - kind: ServiceAccount
+    name: dr-verification-sa
+    namespace: dr-system
+roleRef:
+  kind: ClusterRole
+  name: dr-verification-role
+  apiGroup: rbac.authorization.k8s.io
