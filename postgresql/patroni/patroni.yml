@@ -1,0 +1,73 @@
+# patroni.yml — base config for Patroni 3.x HA cluster (learning material)
+# All sensitive values are overridden by environment variables at runtime.
+# NOTE: Patroni kept as learning material; production fleet uses docker pg17-alpine standalone.
+#
+# Run: docker compose -f l3-patroni-ha-cluster.yml up -d
+# Status: patronictl -c /etc/patroni/patroni.yml list
+# Failover: patronictl -c /etc/patroni/patroni.yml failover postgres-ha
+
+scope: postgres-ha
+namespace: /db/
+name: ${PATRONI_NAME}
+
+restapi:
+  listen: 0.0.0.0:8008
+  connect_address: ${PATRONI_RESTAPI_CONNECT_ADDRESS}
+  # authentication: (add in production)
+  # username: patroni
+  # password: ${PATRONI_REST_PASSWORD}
+
+etcd:
+  url: ${PATRONI_ETCD_URL}
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576   # 1 MB — replica can lag at most this before excluded
+    synchronous_mode: false            # set true for zero RPO (requires at least 1 sync replica)
+    postgresql:
+      use_pg_rewind: true    # fast resync of old primary after failover
+      use_slots: true
+      parameters:
+        wal_level: replica
+        hot_standby: "on"
+        max_wal_senders: 10
+        max_replication_slots: 10
+        wal_log_hints: "on"            # required for pg_rewind
+        archive_mode: "on"
+        archive_command: "/bin/true"   # replace with real WAL-G command in production
+
+  initdb:
+    - encoding: UTF8
+    - data-checksums           # enables page-level checksums, needed for pg_rewind
+
+  pg_hba:
+    - host replication replicator 0.0.0.0/0 md5
+    - host all all 0.0.0.0/0  md5
+
+postgresql:
+  listen: 0.0.0.0:5432
+  connect_address: ${PATRONI_POSTGRESQL_CONNECT_ADDRESS}
+  data_dir: ${PATRONI_POSTGRESQL_DATA_DIR}
+  pgpass: ${PATRONI_POSTGRESQL_PGPASS}
+  authentication:
+    replication:
+      username: ${PATRONI_REPLICATION_USERNAME}
+      password: ${PATRONI_REPLICATION_PASSWORD}
+    superuser:
+      username: ${PATRONI_SUPERUSER_USERNAME}
+      password: ${PATRONI_SUPERUSER_PASSWORD}
+  parameters:
+    shared_buffers: 256MB
+    effective_cache_size: 1GB
+    checkpoint_completion_target: 0.9
+    log_connections: "on"
+    log_disconnections: "on"
+
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+  nosync: false
