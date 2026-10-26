@@ -10,12 +10,13 @@ x-mongo-common: &mongo-common
   image: mongo:9.0
   restart: unless-stopped
   healthcheck:
-    # ping is allowed before authentication
-    test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+    # Port-open check: starting a mongosh (Node.js) every few seconds in 9-11 containers
+    # starves a small CI runner. The init jobs retry until the members really answer.
+    test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/27017'"]
     interval: 5s
     timeout: 5s
-    retries: 20
-    start_period: 20s
+    retries: 30
+    start_period: 10s
   ulimits:
     nproc: 64000
     nofile:

@@ -29,7 +29,12 @@ assert_eq master "$(role_of redis-node-1)" "redis-node-1 is a primary"
 log "stopping redis-node-1 hard"
 docker stop -t 0 redis-node-1 >/dev/null
 
-healed() { [[ "$(cinfo redis-node-2 2>/dev/null | awk -F: '/cluster_state/{print $2}')" == ok ]]; }
+# healed = cluster_state ok AND three primaries without the "fail" flag own slots (the stopped
+# primary is still listed, flagged fail, until the replica that replaced it is promoted)
+healed() {
+  [[ "$(cinfo redis-node-2 2>/dev/null | awk -F: '/cluster_state/{print $2}')" == ok ]] || return 1
+  [[ "$(docker exec redis-node-2 redis-cli cluster nodes | awk '$3 ~ /master/ && $3 !~ /fail/ && NF >= 9' | wc -l)" == 3 ]]
+}
 retry 90 "cluster healed (replica promoted)" healed
 assert_eq 60 "$(for i in $(seq 1 60); do docker exec redis-node-2 redis-cli -c get "key:$i"; done | grep -c value-)" "all 60 keys still readable after losing a primary"
 log "PASS: Redis Cluster"

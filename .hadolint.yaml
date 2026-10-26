@@ -3,3 +3,5 @@
 # every security update.
 ignored:
   - DL3008
+  - DL3066
+# DL3066: the base images create `postgres` / `pgbouncer`; a name is clearer than a UID here.

@@ -9,7 +9,7 @@ PRIMARY_HOST="${PRIMARY_HOST:-postgres-primary}"
 PRIMARY_PORT="${PRIMARY_PORT:-5432}"
 REPLICATION_USER="${REPLICATION_USER:-replicator}"
 REPLICATION_PASSWORD="${REPLICATION_PASSWORD:-repl_secret}"
-PGDATA="${PGDATA:-/var/lib/postgresql/data/pgdata}"
+PGDATA="${PGDATA:-/var/lib/postgresql/18/docker}"
 
 # Passwordless-in-conninfo: both pg_basebackup and the running walreceiver read the
 # replication password from this file (so it must exist on every start).

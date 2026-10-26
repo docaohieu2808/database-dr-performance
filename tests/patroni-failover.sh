@@ -30,7 +30,7 @@ log "building and starting the cluster"
 "${C[@]}" up -d --build --wait --wait-timeout 300
 
 retry 120 "3 running members with a leader" bash -c \
-  "[[ \$(docker exec patroni1 patronictl -c /etc/patroni/patroni.yml list -f json | jq '[.[]|select(.State==\"running\")]|length') == 3 ]]"
+  "[[ \$(docker exec patroni1 patronictl -c /etc/patroni/patroni.yml list -f json | jq '[.[]|select(.State==\"running\" or .State==\"streaming\")]|length') == 3 ]]"
 
 old_leader="$(leader_of patroni1)"
 [[ -n "$old_leader" ]] || fail "no leader found"
