@@ -21,7 +21,7 @@ Velero 1.18.4 (chart 12.2.1), Litmus 3.31, k6 2.3.0, Locust 2.47.0.
 | l1 | `l1-basic-docker-compose.yml` | Single node, tuned settings, init SQL | init SQL ran |
 | l2 | `l2-replication-primary-replica.yml` | Streaming replication, hot standby | rows replicate, replica refuses writes |
 | l3 | `l3-patroni-ha-cluster.yml` | Patroni 4 + etcd 3.7 + HAProxy, 3 nodes | **leader is killed, a replica is promoted, writes continue, old leader rejoins** |
-| l4 | `l4-pgbouncer-pooler.yml` + `l4-pgbouncer-connection-pool.conf` | Transaction pooling in front of l2 | 60 clients multiplexed onto <= 25 server connections |
+| l4 | `l4-pgbouncer-pooler.yml` + `l4-pgbouncer-connection-pool.conf` | Transaction pooling in front of l2 | 100 pgbench clients multiplexed onto <= 35 server connections (pool 25 + reserve 10) |
 | l5 | `l5-pitr-pgbackrest.yml` | Continuous WAL archiving + base backup + PITR with pgBackRest | **rows written, base backup, more rows, timestamp, `DROP TABLE`, restore to the timestamp: table and all rows back** |
 | l5 alt | `l5-backup-wal-g.sh` | The same idea with WAL-G + S3 | shellcheck only (needs a bucket) |
 | l-max | `l-max-custom-extension/` | A real C extension built with pgxs (functions, composite type, aggregate, DDL audit event trigger) | built and loaded in a PostgreSQL 18 image, every function asserted |
@@ -51,6 +51,20 @@ was BSD. **Valkey** is the Linux Foundation BSD fork. Every Redis compose file t
 REDIS_IMAGE=redis:8.10-alpine        docker compose -f redis/l2-sentinel-ha.yml up -d   # default
 REDIS_IMAGE=valkey/valkey:9.1-alpine docker compose -f redis/l2-sentinel-ha.yml up -d
 ```
+
+The ACL file has one `user` line per account and no comments or blank lines (Redis tolerates
+comments, Valkey does not, and neither supports line continuation). Passwords are SHA-256 hashes;
+the lab password of each user is `<username>-lab-password`.
+
+| User | May do |
+|------|--------|
+| `default` | disabled: every client must log in as a named user |
+| `admin` | everything |
+| `appuser` | read/write data structures on keys `app:*`, no admin or dangerous commands |
+| `readonly` | read-only on all keys |
+| `cacheuser`, `sessionuser` | a handful of commands on `cache:*` / `session:*` only |
+| `pubsubuser` | publish/subscribe on `notifications:*` and `alerts:*` channels, no keys |
+| `monitoring`, `backupuser` | INFO/SLOWLOG/... and BGSAVE/CONFIG GET, no data access |
 
 TLS is not covered (the README used to claim it): it is a `redis.conf` concern (`tls-port`,
 `tls-cert-file`, ...), not an ACL one.
