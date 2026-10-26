@@ -6,7 +6,7 @@
 #   az appservice plan create --name myapp-plan --resource-group myapp-rg \
 #     --sku P3v3 --is-linux --location eastus
 #   az webapp create --name myapp-api --resource-group myapp-rg \
-#     --plan myapp-plan --runtime "NODE:20-lts"
+#     --plan myapp-plan --runtime "NODE:24-lts"
 
 # ---------------------------------------------------------------------------
 # App Service Plan (PremiumV3 — best price/performance for production)
@@ -40,7 +40,7 @@ webApp:
   httpsOnly: true
 
   siteConfig:
-    linuxFxVersion: "NODE|20-lts"  # runtime stack
+    linuxFxVersion: "NODE|24-lts"  # runtime stack
     alwaysOn: true
     http20Enabled: true
     ftpsState: Disabled
@@ -99,7 +99,7 @@ webApp:
       - name: LOG_LEVEL
         value: info
       - name: WEBSITE_NODE_DEFAULT_VERSION
-        value: "~20"
+        value: "~24"
       - name: WEBSITE_RUN_FROM_PACKAGE
         value: "1"
       # Application Insights
@@ -145,7 +145,7 @@ webApp:
   slots:
     - name: staging
       siteConfig:
-        linuxFxVersion: "NODE|20-lts"
+        linuxFxVersion: "NODE|24-lts"
         alwaysOn: true
         http20Enabled: true
         httpsOnly: true
@@ -160,7 +160,7 @@ webApp:
 
     - name: canary
       siteConfig:
-        linuxFxVersion: "NODE|20-lts"
+        linuxFxVersion: "NODE|24-lts"
         alwaysOn: false
         appSettings:
           - name: NODE_ENV

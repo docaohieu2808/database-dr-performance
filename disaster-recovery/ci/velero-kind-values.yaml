@@ -1,0 +1,25 @@
+# Layered on top of ../l1-velero-install-helm-values.yaml for the kind test:
+#   helm install velero ... -f l1-velero-install-helm-values.yaml -f ci/velero-kind-values.yaml
+# Replaces the AWS bucket / IRSA settings with the in-cluster S3 store from seaweedfs.yaml.
+snapshotsEnabled: false
+configuration:
+  backupStorageLocation:
+    - name: default
+      provider: aws
+      bucket: velero
+      default: true
+      config:
+        region: us-east-1
+        s3ForcePathStyle: "true"
+        s3Url: http://seaweedfs.velero.svc:8333
+  volumeSnapshotLocation: []
+credentials:
+  existingSecret: null
+  secretContents:
+    cloud: |
+      [default]
+      aws_access_key_id=lab
+      aws_secret_access_key=lab
+serviceAccount:
+  server:
+    annotations: null

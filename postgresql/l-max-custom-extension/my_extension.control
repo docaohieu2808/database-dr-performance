@@ -1,0 +1,4 @@
+comment = 'Teaching extension: C functions, composite type, aggregate, DDL audit event trigger'
+default_version = '1.0'
+module_pathname = '$libdir/my_extension'
+relocatable = false

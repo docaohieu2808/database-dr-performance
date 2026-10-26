@@ -27,7 +27,7 @@ spec:
   # ---------------------------------------------------------------------------
   # Kubernetes version
   # ---------------------------------------------------------------------------
-  kubernetesVersion: "1.29"
+  kubernetesVersion: "1.36"
 
   # ---------------------------------------------------------------------------
   # DNS prefix for FQDN
@@ -278,7 +278,7 @@ spec:
 #   --resource-group myapp-rg \
 #   --name myapp-production \
 #   --location eastus \
-#   --kubernetes-version 1.29 \
+#   --kubernetes-version 1.36 \
 #   --node-count 2 \
 #   --node-vm-size Standard_D8s_v5 \
 #   --zones 1 2 3 \

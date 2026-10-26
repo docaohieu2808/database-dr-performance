@@ -59,12 +59,15 @@ describe_backup() {
 ###############################################################################
 restore_full_cluster() {
     local backup_name="${1:?Backup name required}"
-    local restore_name="restore-full-$(date +%Y%m%d-%H%M%S)"
+    local restore_name
+    restore_name="restore-full-$(date +%Y%m%d-%H%M%S)"
 
     log "Starting full cluster restore from backup: $backup_name"
     warn "This will restore ALL namespaces. Existing resources may be overwritten."
-    read -r -p "Type 'yes' to confirm: " confirm
-    [[ "$confirm" == "yes" ]] || die "Restore cancelled"
+    if [[ "${ASSUME_YES:-}" != "1" ]]; then
+        read -r -p "Type 'yes' to confirm: " confirm
+        [[ "$confirm" == "yes" ]] || die "Restore cancelled"
+    fi
 
     "$VELERO" restore create "$restore_name" \
         --from-backup "$backup_name" \
@@ -82,15 +85,20 @@ restore_full_cluster() {
 restore_namespace() {
     local backup_name="${1:?Backup name required}"
     local target_ns="${2:?Target namespace required}"
-    local restore_name="restore-ns-${target_ns}-$(date +%Y%m%d-%H%M%S)"
+    local restore_name
+    restore_name="restore-ns-${target_ns}-$(date +%Y%m%d-%H%M%S)"
     local into_ns="${3:-$target_ns}"   # optionally restore into different namespace
 
     log "Restoring namespace '$target_ns' from backup: $backup_name"
     [[ "$into_ns" != "$target_ns" ]] && log "Mapping into namespace: $into_ns"
 
-    # Scale down deployments to avoid conflicts during restore
-    log "Scaling down existing deployments in $into_ns..."
-    "$KUBECTL" scale deployment --all --replicas=0 -n "$into_ns" 2>/dev/null || true
+    # Scale down existing deployments to avoid conflicts during restore. Skipped when the
+    # namespace is gone (the usual disaster case). The restore itself brings back the
+    # replica counts recorded in the backup, so nothing needs scaling up afterwards.
+    if "$KUBECTL" get namespace "$into_ns" >/dev/null 2>&1; then
+        log "Scaling down existing deployments in $into_ns..."
+        "$KUBECTL" scale deployment --all --replicas=0 -n "$into_ns"
+    fi
 
     local ns_map_flag=""
     [[ "$into_ns" != "$target_ns" ]] && ns_map_flag="--namespace-mappings ${target_ns}:${into_ns}"
@@ -107,9 +115,6 @@ restore_namespace() {
 
     wait_for_restore "$restore_name"
     validate_restore "$restore_name"
-
-    log "Scaling deployments back up in $into_ns..."
-    "$KUBECTL" scale deployment --all --replicas=1 -n "$into_ns" 2>/dev/null || true
 }
 
 ###############################################################################
@@ -120,7 +125,8 @@ restore_selective() {
     local namespace="${2:?Namespace required}"
     local resource_types="${3:-deployments,services,configmaps,secrets,persistentvolumeclaims}"
     local label_selector="${4:-}"
-    local restore_name="restore-selective-$(date +%Y%m%d-%H%M%S)"
+    local restore_name
+    restore_name="restore-selective-$(date +%Y%m%d-%H%M%S)"
 
     log "Selective restore: backup=$backup_name ns=$namespace resources=$resource_types"
 
@@ -147,14 +153,15 @@ restore_selective() {
 restore_pitr() {
     local namespace="${1:?Namespace required}"
     local before_time="${2:?Timestamp required (RFC3339, e.g. 2024-01-15T14:30:00Z)}"
-    local restore_name="restore-pitr-$(date +%Y%m%d-%H%M%S)"
+    local restore_name
+    restore_name="restore-pitr-$(date +%Y%m%d-%H%M%S)"
 
     log "Finding latest backup before: $before_time"
 
     # Find most recent backup completed before the target time
     local backup_name
     backup_name=$(
-        "$VELERO" backup get --namespace "$VELERO_NS" -o json |
+        "$KUBECTL" get backups.velero.io --namespace "$VELERO_NS" -o json |
         python3 -c "
 import json, sys, datetime
 data = json.load(sys.stdin)
@@ -197,8 +204,9 @@ wait_for_restore() {
 
     while true; do
         local phase
-        phase=$("$VELERO" restore get "$restore_name" \
-            --namespace "$VELERO_NS" -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
+        phase=$("$KUBECTL" get restores.velero.io "$restore_name" \
+            --namespace "$VELERO_NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+        phase="${phase:-Unknown}"
 
         case "$phase" in
             Completed)
@@ -238,15 +246,17 @@ validate_restore() {
         --details 2>&1 | tee -a "$LOG_FILE"
 
     local warnings errors
-    warnings=$("$VELERO" restore describe "$restore_name" \
-        --namespace "$VELERO_NS" -o json 2>/dev/null |
-        python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status',{}).get('warnings',0))")
-    errors=$("$VELERO" restore describe "$restore_name" \
-        --namespace "$VELERO_NS" -o json 2>/dev/null |
-        python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status',{}).get('errors',0))")
+    warnings=$("$KUBECTL" get restores.velero.io "$restore_name" --namespace "$VELERO_NS" \
+        -o jsonpath='{.status.warnings}')
+    errors=$("$KUBECTL" get restores.velero.io "$restore_name" --namespace "$VELERO_NS" \
+        -o jsonpath='{.status.errors}')
+    warnings="${warnings:-0}"
+    errors="${errors:-0}"
 
     log "Restore summary — warnings: $warnings, errors: $errors"
-    [[ "$errors" -gt 0 ]] && warn "Restore completed with $errors errors — review logs"
+    if [[ "$errors" -gt 0 ]]; then
+        die "Restore finished with $errors errors"
+    fi
     log "Restore log: $LOG_FILE"
 }
 
@@ -282,6 +292,7 @@ Environment:
   VELERO_BIN      Path to velero binary (default: velero)
   KUBECTL_BIN     Path to kubectl binary (default: kubectl)
   RESTORE_TIMEOUT Timeout in seconds (default: 1800)
+  ASSUME_YES      Set to 1 to skip the confirmation prompt of the full-cluster restore
   LOG_FILE        Log output path (default: /tmp/velero-restore-<timestamp>.log)
 EOF
 }

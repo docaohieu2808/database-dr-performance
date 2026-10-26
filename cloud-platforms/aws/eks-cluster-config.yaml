@@ -11,7 +11,7 @@ kind: ClusterConfig
 metadata:
   name: myapp-production
   region: us-east-1
-  version: "1.29"
+  version: "1.37"
   tags:
     environment: production
     team: platform

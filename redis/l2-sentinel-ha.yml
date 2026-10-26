@@ -1,184 +1,108 @@
-version: "3.9"
+name: redis-sentinel
 
-# Redis Sentinel HA: 1 primary + 2 replicas + 3 sentinels
-# Sentinel monitors primary, triggers automatic failover on failure
-# Clients connect to sentinel to discover current primary address
+# Redis Sentinel HA: 1 primary + 2 replicas + 3 sentinels (quorum 2).
+# Sentinels watch the primary and promote a replica when it is gone for 5 s.
+# Clients ask a sentinel (port 26379) which node is the primary.
+# Switch to Valkey with: REDIS_IMAGE=valkey/valkey:9.1-alpine
+# Failover test: tests/redis-sentinel-failover.sh
+
+x-redis-node: &redis-node
+  image: ${REDIS_IMAGE:-redis:8.10-alpine}
+  restart: unless-stopped
+  networks: [redis-sentinel-net]
+  environment:
+    REDIS_PASSWORD: ${REDIS_PASSWORD:-redispassword}
+    REDISCLI_AUTH: ${REDIS_PASSWORD:-redispassword}
+  healthcheck:
+    test: ["CMD", "redis-cli", "ping"]
+    interval: 3s
+    timeout: 3s
+    retries: 20
+
+x-sentinel: &sentinel
+  image: ${REDIS_IMAGE:-redis:8.10-alpine}
+  restart: unless-stopped
+  networks: [redis-sentinel-net]
+  environment:
+    REDIS_PASSWORD: ${REDIS_PASSWORD:-redispassword}   # sentinel itself has no password
+  # Sentinel rewrites its own config file, so generate a writable copy on start.
+  # resolve-hostnames lets it monitor `redis-primary` by DNS name.
+  command:
+    - sh
+    - -c
+    - |
+      cat > /tmp/sentinel.conf <<EOF
+      port 26379
+      dir /tmp
+      sentinel resolve-hostnames yes
+      sentinel monitor mymaster redis-primary 6379 2
+      sentinel auth-pass mymaster $$REDIS_PASSWORD
+      sentinel down-after-milliseconds mymaster 5000
+      sentinel failover-timeout mymaster 10000
+      sentinel parallel-syncs mymaster 1
+      EOF
+      exec redis-sentinel /tmp/sentinel.conf
+  healthcheck:
+    test: ["CMD", "redis-cli", "-p", "26379", "ping"]
+    interval: 3s
+    timeout: 3s
+    retries: 20
+  depends_on:
+    redis-primary: {condition: service_healthy}
+    redis-replica-1: {condition: service_healthy}
+    redis-replica-2: {condition: service_healthy}
 
 services:
   redis-primary:
-    image: redis:7.2-alpine
+    <<: *redis-node
     container_name: redis-primary
-    restart: unless-stopped
     command: >
-      redis-server
-        --requirepass ${REDIS_PASSWORD:-redispassword}
-        --masterauth ${REDIS_PASSWORD:-redispassword}
-        --appendonly yes
-        --appendfsync everysec
-        --maxmemory 512mb
-        --maxmemory-policy allkeys-lru
-        --save 900 1
-        --save 300 10
-        --loglevel notice
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-primary-data:/data
-    networks:
-      redis-sentinel-net:
-        ipv4_address: 172.20.0.10
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redispassword}", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+      redis-server --requirepass ${REDIS_PASSWORD:-redispassword}
+      --masterauth ${REDIS_PASSWORD:-redispassword}
+      --appendonly yes --appendfsync everysec --maxmemory 256mb --loglevel notice
+    ports: ["127.0.0.1:6379:6379"]
+    volumes: [redis-primary-data:/data]
 
   redis-replica-1:
-    image: redis:7.2-alpine
+    <<: *redis-node
     container_name: redis-replica-1
-    restart: unless-stopped
     command: >
-      redis-server
-        --requirepass ${REDIS_PASSWORD:-redispassword}
-        --masterauth ${REDIS_PASSWORD:-redispassword}
-        --replicaof redis-primary 6379
-        --replica-read-only yes
-        --appendonly yes
-        --appendfsync everysec
-        --maxmemory 512mb
-        --maxmemory-policy allkeys-lru
-        --loglevel notice
-    ports:
-      - "6380:6379"
-    volumes:
-      - redis-replica-1-data:/data
-    networks:
-      redis-sentinel-net:
-        ipv4_address: 172.20.0.11
+      redis-server --requirepass ${REDIS_PASSWORD:-redispassword}
+      --masterauth ${REDIS_PASSWORD:-redispassword}
+      --replicaof redis-primary 6379 --replica-read-only yes
+      --appendonly yes --appendfsync everysec --maxmemory 256mb --loglevel notice
+    ports: ["127.0.0.1:6380:6379"]
+    volumes: [redis-replica-1-data:/data]
     depends_on:
-      redis-primary:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redispassword}", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+      redis-primary: {condition: service_healthy}
 
   redis-replica-2:
-    image: redis:7.2-alpine
+    <<: *redis-node
     container_name: redis-replica-2
-    restart: unless-stopped
     command: >
-      redis-server
-        --requirepass ${REDIS_PASSWORD:-redispassword}
-        --masterauth ${REDIS_PASSWORD:-redispassword}
-        --replicaof redis-primary 6379
-        --replica-read-only yes
-        --appendonly yes
-        --appendfsync everysec
-        --maxmemory 512mb
-        --maxmemory-policy allkeys-lru
-        --loglevel notice
-    ports:
-      - "6381:6379"
-    volumes:
-      - redis-replica-2-data:/data
-    networks:
-      redis-sentinel-net:
-        ipv4_address: 172.20.0.12
+      redis-server --requirepass ${REDIS_PASSWORD:-redispassword}
+      --masterauth ${REDIS_PASSWORD:-redispassword}
+      --replicaof redis-primary 6379 --replica-read-only yes
+      --appendonly yes --appendfsync everysec --maxmemory 256mb --loglevel notice
+    ports: ["127.0.0.1:6381:6379"]
+    volumes: [redis-replica-2-data:/data]
     depends_on:
-      redis-primary:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redispassword}", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+      redis-primary: {condition: service_healthy}
 
-  # Sentinel 1
   redis-sentinel-1:
-    image: redis:7.2-alpine
+    <<: *sentinel
     container_name: redis-sentinel-1
-    restart: unless-stopped
-    command: >
-      sh -c "
-        echo 'bind 0.0.0.0' > /etc/sentinel.conf &&
-        echo 'sentinel announce-ip redis-sentinel-1' >> /etc/sentinel.conf &&
-        echo 'sentinel announce-port 26379' >> /etc/sentinel.conf &&
-        echo 'sentinel monitor mymaster redis-primary 6379 2' >> /etc/sentinel.conf &&
-        echo 'sentinel auth-pass mymaster ${REDIS_PASSWORD:-redispassword}' >> /etc/sentinel.conf &&
-        echo 'sentinel down-after-milliseconds mymaster 5000' >> /etc/sentinel.conf &&
-        echo 'sentinel failover-timeout mymaster 10000' >> /etc/sentinel.conf &&
-        echo 'sentinel parallel-syncs mymaster 1' >> /etc/sentinel.conf &&
-        echo 'loglevel notice' >> /etc/sentinel.conf &&
-        redis-sentinel /etc/sentinel.conf
-      "
-    ports:
-      - "26379:26379"
-    networks:
-      redis-sentinel-net:
-        ipv4_address: 172.20.0.20
-    depends_on:
-      redis-primary:
-        condition: service_healthy
-      redis-replica-1:
-        condition: service_healthy
-      redis-replica-2:
-        condition: service_healthy
+    ports: ["127.0.0.1:26379:26379"]
 
-  # Sentinel 2
   redis-sentinel-2:
-    image: redis:7.2-alpine
+    <<: *sentinel
     container_name: redis-sentinel-2
-    restart: unless-stopped
-    command: >
-      sh -c "
-        echo 'bind 0.0.0.0' > /etc/sentinel.conf &&
-        echo 'sentinel announce-ip redis-sentinel-2' >> /etc/sentinel.conf &&
-        echo 'sentinel announce-port 26379' >> /etc/sentinel.conf &&
-        echo 'sentinel monitor mymaster redis-primary 6379 2' >> /etc/sentinel.conf &&
-        echo 'sentinel auth-pass mymaster ${REDIS_PASSWORD:-redispassword}' >> /etc/sentinel.conf &&
-        echo 'sentinel down-after-milliseconds mymaster 5000' >> /etc/sentinel.conf &&
-        echo 'sentinel failover-timeout mymaster 10000' >> /etc/sentinel.conf &&
-        echo 'sentinel parallel-syncs mymaster 1' >> /etc/sentinel.conf &&
-        echo 'loglevel notice' >> /etc/sentinel.conf &&
-        redis-sentinel /etc/sentinel.conf
-      "
-    ports:
-      - "26380:26379"
-    networks:
-      redis-sentinel-net:
-        ipv4_address: 172.20.0.21
-    depends_on:
-      redis-primary:
-        condition: service_healthy
+    ports: ["127.0.0.1:26380:26379"]
 
-  # Sentinel 3
   redis-sentinel-3:
-    image: redis:7.2-alpine
+    <<: *sentinel
     container_name: redis-sentinel-3
-    restart: unless-stopped
-    command: >
-      sh -c "
-        echo 'bind 0.0.0.0' > /etc/sentinel.conf &&
-        echo 'sentinel announce-ip redis-sentinel-3' >> /etc/sentinel.conf &&
-        echo 'sentinel announce-port 26379' >> /etc/sentinel.conf &&
-        echo 'sentinel monitor mymaster redis-primary 6379 2' >> /etc/sentinel.conf &&
-        echo 'sentinel auth-pass mymaster ${REDIS_PASSWORD:-redispassword}' >> /etc/sentinel.conf &&
-        echo 'sentinel down-after-milliseconds mymaster 5000' >> /etc/sentinel.conf &&
-        echo 'sentinel failover-timeout mymaster 10000' >> /etc/sentinel.conf &&
-        echo 'sentinel parallel-syncs mymaster 1' >> /etc/sentinel.conf &&
-        echo 'loglevel notice' >> /etc/sentinel.conf &&
-        redis-sentinel /etc/sentinel.conf
-      "
-    ports:
-      - "26381:26379"
-    networks:
-      redis-sentinel-net:
-        ipv4_address: 172.20.0.22
-    depends_on:
-      redis-primary:
-        condition: service_healthy
+    ports: ["127.0.0.1:26381:26379"]
 
 volumes:
   redis-primary-data:
@@ -188,21 +112,8 @@ volumes:
 networks:
   redis-sentinel-net:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/24
 
-# --- Client connection example (Python redis-py) ---
-# from redis.sentinel import Sentinel
-# sentinel = Sentinel([
-#     ('localhost', 26379),
-#     ('localhost', 26380),
-#     ('localhost', 26381),
-# ], socket_timeout=0.5, password='redispassword')
-# master = sentinel.master_for('mymaster', socket_timeout=0.5)
-# slave  = sentinel.slave_for('mymaster', socket_timeout=0.5)
-#
-# --- Verify sentinel ---
-# redis-cli -p 26379 sentinel masters
-# redis-cli -p 26379 sentinel slaves mymaster
-# redis-cli -p 26379 sentinel failover mymaster
+# Client example (redis-py):
+#   from redis.sentinel import Sentinel
+#   s = Sentinel([("localhost", 26379), ("localhost", 26380), ("localhost", 26381)])
+#   s.master_for("mymaster", password="redispassword").set("k", "v")

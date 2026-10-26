@@ -1,53 +1,125 @@
-# Litmus Chaos pod-delete experiment
-# Deletes random pods in a target namespace to test resilience and recovery
-# Docs: https://litmuschaos.github.io/litmus/experiments/categories/pods/pod-delete/
+# Litmus 3.x pod-delete chaos against a sample 3-replica service.
 #
-# Prerequisites:
-#   kubectl apply -f https://litmuschaos.github.io/litmus/litmus-operator-v3.0.0.yaml
-#   kubectl apply -f https://hub.litmuschaos.io/api/chaos?file=charts/generic/pod-delete/experiment.yaml
+# Versions: litmus-core Helm chart 3.31.1 (operator/runner 3.31.0), experiment
+# definitions from litmuschaos/chaos-charts tag 3.31.0.
 #
-# Apply: kubectl apply -f l4-litmus-chaos-experiment.yaml
+# Install the operator + CRDs and the experiment definition once:
+#   helm repo add litmuschaos https://litmuschaos.github.io/litmus-helm/
+#   helm install litmus-core litmuschaos/litmus-core --version 3.31.1 -n litmus --create-namespace
+#   kubectl create namespace chaos-demo
+#   kubectl apply -n chaos-demo -f \
+#     https://raw.githubusercontent.com/litmuschaos/chaos-charts/3.31.0/faults/kubernetes/pod-delete/fault.yaml
+# Run the experiment:
+#   kubectl apply -f l4-litmus-chaos-experiment.yaml
+#   kubectl -n chaos-demo get chaosresult pod-delete-chaos-engine-pod-delete -o jsonpath='{.status.experimentStatus.verdict}'
+# CI does exactly this on a kind cluster and requires verdict Pass.
+#
+# ChaosCenter (the Litmus 3 portal, helm chart `litmuschaos/litmus`)
+# adds a UI, scheduling and workflows on top of this same CRD-based mechanism.
 
 ---
-# ServiceAccount for the experiment runner
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chaos-demo
+
+---
+# The application under test: any Deployment selected by label works
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-api-service
+  namespace: chaos-demo
+  labels:
+    app: my-api-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: my-api-service
+  template:
+    metadata:
+      labels:
+        app: my-api-service
+    spec:
+      containers:
+        - name: web
+          image: nginx:1.31-alpine
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            periodSeconds: 2
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-api-service
+  namespace: chaos-demo
+spec:
+  selector:
+    app: my-api-service
+  ports:
+    - port: 80
+      targetPort: 80
+
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: pod-delete-sa
-  namespace: production
+  namespace: chaos-demo
   labels:
     app: pod-delete
-    chaos.litmuschaos.io/controller-manager: "true"
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: pod-delete-role
-  namespace: production
+  namespace: chaos-demo
 rules:
   - apiGroups: [""]
-    resources: ["pods", "pods/exec", "pods/log", "events", "replicationcontrollers"]
-    verbs: ["create", "list", "get", "patch", "update", "delete", "deletecollection"]
+    resources: ["pods"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "deletecollection"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "get", "list", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["get", "list", "create"]
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets", "replicasets", "daemonsets"]
-    verbs: ["list", "get", "patch", "update"]
+    verbs: ["list", "get"]
+  - apiGroups: [""]
+    resources: ["replicationcontrollers"]
+    verbs: ["get", "list"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "list", "get", "delete", "deletecollection"]
   - apiGroups: ["litmuschaos.io"]
     resources: ["chaosengines", "chaosexperiments", "chaosresults"]
     verbs: ["create", "list", "get", "patch", "update", "delete"]
-  - apiGroups: [""]
-    resources: ["configmaps", "secrets"]
-    verbs: ["list", "get"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: pod-delete-rb
-  namespace: production
+  namespace: chaos-demo
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -55,153 +127,71 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: pod-delete-sa
-    namespace: production
+    namespace: chaos-demo
 
 ---
-# ChaosEngine: defines what to target and which experiment to run
+# ChaosEngine: what to attack, which experiment, which probes decide pass/fail
 apiVersion: litmuschaos.io/v1alpha1
 kind: ChaosEngine
 metadata:
   name: pod-delete-chaos-engine
-  namespace: production
+  namespace: chaos-demo
   labels:
     app: pod-delete
-    experiment: pod-delete
 spec:
-  # Target application
   appinfo:
-    appns: production
+    appns: chaos-demo
     applabel: "app=my-api-service"
     appkind: deployment
-
-  # Run mode: parallel = all experiments at once; serial = one by one
   engineState: active
   chaosServiceAccount: pod-delete-sa
-
-  # Monitoring — annotate pods for Prometheus scraping
-  monitoring: true
-
-  # Job cleanup policy: retain | delete
   jobCleanUpPolicy: delete
-
-  # Annotations for the chaos runner pod
   annotationCheck: "false"
-
   experiments:
     - name: pod-delete
       spec:
-        # Override default experiment parameters
         components:
+          experimentImage: litmuschaos/go-runner:3.31.0
           env:
-            # Number of pods to delete per iteration
             - name: TOTAL_CHAOS_DURATION
-              value: "60"        # seconds of chaos
-
+              value: "30"        # seconds of chaos
             - name: CHAOS_INTERVAL
-              value: "10"        # seconds between pod deletions
-
-            # Percentage of pods to kill (mutually exclusive with PODS_AFFECTED_PERC)
+              value: "10"        # seconds between deletions
             - name: PODS_AFFECTED_PERC
-              value: "50"        # kill 50% of matching pods
-
-            # Force delete (skip graceful termination)
+              value: "50"        # delete 50% of matching pods each round
             - name: FORCE
-              value: "false"     # use graceful termination
-
-            # Sequence: parallel | serial
+              value: "false"     # graceful termination
             - name: SEQUENCE
               value: "parallel"
-
-            # Node selector for chaos runner pod
-            - name: NODE_LABEL
-              value: ""
-
-            # Target specific pod names (comma-separated; empty = random selection)
-            - name: TARGET_PODS
-              value: ""
-
-            # Container runtime: docker | containerd | crio
-            - name: CONTAINER_RUNTIME
-              value: containerd
-
-            # Socket path for container runtime
-            - name: SOCKET_PATH
-              value: /run/containerd/containerd.sock
-
-        # Probes — health validation during and after chaos
         probe:
-          # HTTP probe: verify API responds during chaos
+          # The service must keep answering while pods are being killed
           - name: api-health-probe
             type: httpProbe
+            mode: Continuous
+            runProperties:
+              probeTimeout: 5s
+              interval: 2s
+              retry: 2
+              stopOnFailure: false
             httpProbe/inputs:
-              url: "http://my-api-service.production.svc.cluster.local/healthz"
+              url: http://my-api-service.chaos-demo.svc.cluster.local/
               insecureSkipVerify: false
-              responseTimeout: 5000
               method:
                 get:
                   criteria: "=="
                   responseCode: "200"
-            mode: Continuous
-            runProperties:
-              probeTimeout: 5
-              interval: 5
-              retry: 3
-              probePollingInterval: 2
-              stopOnFailure: false
-
-          # Command probe: verify database connectivity during chaos
-          - name: db-connectivity-probe
-            type: cmdProbe
-            cmdProbe/inputs:
-              command: >
-                kubectl exec -n production
-                  $(kubectl get pod -n production -l app=my-api-service -o jsonpath='{.items[0].metadata.name}')
-                  -- sh -c 'pg_isready -h postgres-primary -p 5432'
-              comparator:
-                type: string
-                criteria: contains
-                value: "accepting connections"
-            mode: Edge
-            runProperties:
-              probeTimeout: 10
-              interval: 10
-              retry: 2
-              stopOnFailure: false
-
-          # k8s probe: verify deployment has minimum ready replicas
-          - name: deployment-ready-probe
+          # The Deployment object must still exist after the run
+          - name: deployment-present-probe
             type: k8sProbe
+            mode: EOT
+            runProperties:
+              probeTimeout: 5s
+              interval: 2s
+              retry: 1
             k8sProbe/inputs:
               group: apps
               version: v1
               resource: deployments
-              namespace: production
+              namespace: chaos-demo
               fieldSelector: "metadata.name=my-api-service"
-              labelSelector: "app=my-api-service"
               operation: present
-            mode: Continuous
-            runProperties:
-              probeTimeout: 5
-              interval: 10
-              retry: 3
-              stopOnFailure: false
-
----
-# ChaosResult: read after experiment completes
-# kubectl get chaosresult pod-delete-chaos-engine-pod-delete -n production -o yaml
-apiVersion: litmuschaos.io/v1alpha1
-kind: ChaosResult
-metadata:
-  name: pod-delete-chaos-engine-pod-delete
-  namespace: production
-  labels:
-    app: pod-delete
-spec:
-  engine: pod-delete-chaos-engine
-  experiment: pod-delete
-status:
-  experimentStatus:
-    phase: ""          # populated after run: Completed | Aborted
-    verdict: ""        # Pass | Fail | Stopped
-    failStep: ""
-    probeSuccessPercentage: ""

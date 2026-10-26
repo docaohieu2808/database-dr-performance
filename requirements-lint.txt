@@ -1,0 +1,2 @@
+yamllint==1.38.0
+cfn-lint==1.58.0

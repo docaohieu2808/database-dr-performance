@@ -1,0 +1,5 @@
+# DL3008: apt packages come from the pinned base image's distribution repo and the
+# image is rebuilt weekly in CI; pinning exact apt versions would break the build on
+# every security update.
+ignored:
+  - DL3008

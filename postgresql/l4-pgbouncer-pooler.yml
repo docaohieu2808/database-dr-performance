@@ -1,0 +1,34 @@
+name: pg-pooler
+
+# l2 (primary + replica) with PgBouncer in front, using l4-pgbouncer-connection-pool.conf.
+# Clients connect to 127.0.0.1:6432 and use database alias `appdb` (primary)
+# or `appdb_replica`.
+
+include:
+  - l2-replication-primary-replica.yml
+
+services:
+  pgbouncer:
+    build:
+      context: ./pgbouncer
+    image: pgbouncer-alpine:local
+    container_name: pgbouncer
+    restart: unless-stopped
+    environment:
+      PGB_USER: ${POSTGRES_USER:-pguser}
+      PGB_PASSWORD: ${POSTGRES_PASSWORD:-pgpassword}
+    volumes:
+      - ./l4-pgbouncer-connection-pool.conf:/etc/pgbouncer/pgbouncer.ini:ro
+    ports:
+      - "127.0.0.1:6432:6432"
+    networks: [pg-replication-net]
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      postgres-replica:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

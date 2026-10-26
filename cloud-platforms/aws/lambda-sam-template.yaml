@@ -16,7 +16,7 @@ Description: MyApp serverless backend — REST API with Lambda functions
 # ---------------------------------------------------------------------------
 Globals:
   Function:
-    Runtime: nodejs20.x
+    Runtime: nodejs24.x
     Architectures: [arm64]        # Graviton2 — cheaper + faster for most workloads
     MemorySize: 512
     Timeout: 30
@@ -216,11 +216,11 @@ Resources:
       LayerName: !Sub "myapp-common-${Environment}"
       Description: Shared Node.js dependencies and utilities
       ContentUri: layers/common/
-      CompatibleRuntimes: [nodejs20.x]
+      CompatibleRuntimes: [nodejs24.x]
       CompatibleArchitectures: [arm64]
       RetentionPolicy: Retain
     Metadata:
-      BuildMethod: nodejs20.x
+      BuildMethod: nodejs24.x
 
   # -------------------------------------------------------------------------
   # DynamoDB table (single-table design)
@@ -228,6 +228,7 @@ Resources:
   AppTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       TableName: !Sub "myapp-${Environment}"
       BillingMode: PAY_PER_REQUEST
@@ -312,12 +313,13 @@ Resources:
       UsernameAttributes: [email]
       MfaConfiguration: OPTIONAL
       EnabledMfas: [SOFTWARE_TOKEN_MFA]
-      PasswordPolicy:
-        MinimumLength: 12
-        RequireUppercase: true
-        RequireLowercase: true
-        RequireNumbers: true
-        RequireSymbols: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
 
   # -------------------------------------------------------------------------
   # Security group for Lambda VPC access

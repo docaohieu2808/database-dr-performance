@@ -1,321 +1,179 @@
-# Custom Litmus chaos experiment — network partition + CPU stress + disk fill
-# Demonstrates: ChaosExperiment CRD, multi-fault chaining, custom probes
-# Docs: https://litmuschaos.github.io/litmus/experiments/
-#
+# Multi-fault Litmus ChaosEngine: network latency, CPU hog and disk fill run one
+# after another against the same service, with an SLO probe on each.
+# Builds on the namespace, Deployment and Service from l4-litmus-chaos-experiment.yaml
+# (apply that first). Each fault's definition comes from litmuschaos/chaos-charts:
+#   for f in pod-network-latency pod-cpu-hog disk-fill; do
+#     kubectl apply -n chaos-demo -f \
+#       https://raw.githubusercontent.com/litmuschaos/chaos-charts/3.31.0/faults/kubernetes/$f/fault.yaml
+#   done
 # Apply: kubectl apply -f l-max-custom-chaos-experiment.yaml
+#
+# CI validates it against the real Litmus 3.31 CRDs (server-side dry run) and installs the
+# fault definitions; it does not execute these three faults (network/CPU faults need a
+# real node kernel and are not reliable on a shared runner).
+#
+# Scheduling: the legacy ChaosSchedule CRD is not part of the Litmus 3 operator install.
+# To run this weekly use a ChaosCenter workflow / cron schedule, or a Kubernetes CronJob
+# that re-applies the engine.
 
 ---
-# =============================================================================
-# Custom ChaosExperiment: network-partition-and-cpu-stress
-# Combines network latency injection with CPU stress on the same target pods
-# =============================================================================
-apiVersion: litmuschaos.io/v1alpha1
-kind: ChaosExperiment
+apiVersion: v1
+kind: ServiceAccount
 metadata:
-  name: network-partition-and-cpu-stress
-  namespace: production
-  labels:
-    app.kubernetes.io/part-of: litmus
-    app.kubernetes.io/component: chaosexperiment
-    chaostoolkit.org/experiment: network-cpu-combo
-spec:
-  definition:
-    scope: Namespaced
-    permissions:
-      - apiGroups: [""]
-        resources: ["pods", "pods/exec", "pods/log", "events"]
-        verbs: ["create", "list", "get", "patch", "update", "delete"]
-      - apiGroups: ["apps"]
-        resources: ["deployments", "statefulsets"]
-        verbs: ["list", "get"]
-      - apiGroups: ["litmuschaos.io"]
-        resources: ["chaosengines", "chaosexperiments", "chaosresults"]
-        verbs: ["create", "list", "get", "patch", "update"]
-      - apiGroups: ["batch"]
-        resources: ["jobs"]
-        verbs: ["create", "list", "get", "delete"]
-    image: litmuschaos/go-runner:3.0.0
-    imagePullPolicy: Always
-    args:
-      - -c
-      - ./experiments -name network-partition-and-cpu-stress
-    command:
-      - /bin/bash
-    env:
-      # --- Network fault parameters ---
-      - name: NETWORK_INTERFACE
-        value: eth0
-      - name: NETWORK_LATENCY
-        value: "2000"          # inject 2000ms latency
-      - name: JITTER
-        value: "500"           # ±500ms jitter
-      - name: NETWORK_PACKET_LOSS_PERCENTAGE
-        value: "20"            # 20% packet loss
-      - name: NETWORK_CORRUPTION_PERCENTAGE
-        value: "5"             # 5% packet corruption
-      - name: DESTINATION_IPS
-        value: ""              # empty = all traffic
-      - name: DESTINATION_HOSTS
-        value: ""
-      - name: SOURCE_PORTS
-        value: ""
-
-      # --- CPU stress parameters ---
-      - name: CPU_CORES
-        value: "2"             # stress 2 CPU cores
-      - name: CPU_LOAD
-        value: "80"            # 80% CPU utilization target
-      - name: CPU_KILL_PROCESS
-        value: "false"
-
-      # --- Common chaos parameters ---
-      - name: TOTAL_CHAOS_DURATION
-        value: "120"           # 2 minutes
-      - name: CHAOS_INTERVAL
-        value: "30"            # 30s between fault cycles
-      - name: PODS_AFFECTED_PERC
-        value: "30"            # affect 30% of pods
-      - name: SEQUENCE
-        value: parallel
-      - name: TARGET_PODS
-        value: ""
-      - name: TARGET_CONTAINER
-        value: ""
-      - name: NODE_LABEL
-        value: ""
-      - name: CONTAINER_RUNTIME
-        value: containerd
-      - name: SOCKET_PATH
-        value: /run/containerd/containerd.sock
-      - name: TC_IMAGE
-        value: gaiadocker/iproute2
-      - name: LIB_IMAGE
-        value: litmuschaos/go-runner:3.0.0
-      - name: RAMP_TIME
-        value: "10"            # seconds to wait before chaos injection
-    labels:
-      name: network-partition-and-cpu-stress
-      app.kubernetes.io/part-of: litmus
-      app.kubernetes.io/component: experiment-job
+  name: multi-fault-sa
+  namespace: chaos-demo
 
 ---
-# =============================================================================
-# Custom ChaosExperiment: disk-fill-pressure
-# Fills disk on target pods to test storage exhaustion behavior
-# =============================================================================
-apiVersion: litmuschaos.io/v1alpha1
-kind: ChaosExperiment
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
 metadata:
-  name: disk-fill-pressure
-  namespace: production
-  labels:
-    app.kubernetes.io/part-of: litmus
-    app.kubernetes.io/component: chaosexperiment
-spec:
-  definition:
-    scope: Namespaced
-    permissions:
-      - apiGroups: [""]
-        resources: ["pods", "pods/exec", "pods/log", "events"]
-        verbs: ["create", "list", "get", "patch", "update", "delete"]
-      - apiGroups: ["litmuschaos.io"]
-        resources: ["chaosengines", "chaosexperiments", "chaosresults"]
-        verbs: ["create", "list", "get", "patch", "update"]
-      - apiGroups: ["batch"]
-        resources: ["jobs"]
-        verbs: ["create", "list", "get", "delete"]
-    image: litmuschaos/go-runner:3.0.0
-    imagePullPolicy: Always
-    args:
-      - -c
-      - ./experiments -name disk-fill
-    command:
-      - /bin/bash
-    env:
-      - name: FILL_PATH
-        value: /var/data        # path to fill inside the container
-      - name: EPHEMERAL_STORAGE_MEBIBYTES
-        value: "500"            # fill 500 MiB
-      - name: TOTAL_CHAOS_DURATION
-        value: "60"
-      - name: PODS_AFFECTED_PERC
-        value: "50"
-      - name: CONTAINER_RUNTIME
-        value: containerd
-      - name: SOCKET_PATH
-        value: /run/containerd/containerd.sock
-      - name: TARGET_CONTAINER
-        value: ""
-      - name: DATA_BLOCK_SIZE
-        value: "256"            # write 256KB blocks
-    labels:
-      name: disk-fill-pressure
-      app.kubernetes.io/part-of: litmus
+  name: multi-fault-role
+  namespace: chaos-demo
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/exec", "pods/log", "events", "configmaps", "replicationcontrollers"]
+    verbs: ["create", "list", "get", "patch", "update", "delete", "deletecollection", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "replicasets", "daemonsets"]
+    verbs: ["list", "get"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "list", "get", "delete", "deletecollection"]
+  - apiGroups: ["litmuschaos.io"]
+    resources: ["chaosengines", "chaosexperiments", "chaosresults"]
+    verbs: ["create", "list", "get", "patch", "update", "delete"]
 
 ---
-# =============================================================================
-# ChaosEngine: orchestrates the multi-fault experiment
-# Runs network-partition-and-cpu-stress followed by disk-fill-pressure
-# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: multi-fault-rb
+  namespace: chaos-demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: multi-fault-role
+subjects:
+  - kind: ServiceAccount
+    name: multi-fault-sa
+    namespace: chaos-demo
+
+---
 apiVersion: litmuschaos.io/v1alpha1
 kind: ChaosEngine
 metadata:
   name: multi-fault-chaos-engine
-  namespace: production
+  namespace: chaos-demo
   labels:
     app: my-api-service
-    experiment: multi-fault
 spec:
   appinfo:
-    appns: production
+    appns: chaos-demo
     applabel: "app=my-api-service"
     appkind: deployment
-
   engineState: active
-  chaosServiceAccount: pod-delete-sa     # reuse SA from l4 experiment
-  monitoring: true
-  jobCleanUpPolicy: retain               # retain jobs for post-mortem
+  chaosServiceAccount: multi-fault-sa
+  jobCleanUpPolicy: retain          # keep the helper pods for post-mortems
   annotationCheck: "false"
-
   experiments:
-    # Experiment 1: network partition + CPU stress
-    - name: network-partition-and-cpu-stress
+    # 1. Network: 2 s latency on 30% of the pods
+    - name: pod-network-latency
       spec:
         components:
+          experimentImage: litmuschaos/go-runner:3.31.0
           env:
             - name: TOTAL_CHAOS_DURATION
               value: "120"
             - name: NETWORK_LATENCY
-              value: "2000"
-            - name: NETWORK_PACKET_LOSS_PERCENTAGE
-              value: "20"
+              value: "2000"          # ms
+            - name: JITTER
+              value: "500"
+            - name: PODS_AFFECTED_PERC
+              value: "30"
+            - name: CONTAINER_RUNTIME
+              value: containerd
+            - name: SOCKET_PATH
+              value: /run/containerd/containerd.sock
+        probe:
+          - name: latency-slo-probe
+            type: httpProbe
+            mode: Continuous
+            runProperties:
+              probeTimeout: 10s
+              interval: 5s
+              retry: 2
+              stopOnFailure: false
+            httpProbe/inputs:
+              url: http://my-api-service.chaos-demo.svc.cluster.local/
+              insecureSkipVerify: false
+              method:
+                get:
+                  criteria: "=="
+                  responseCode: "200"
+
+    # 2. CPU: 80% load on 2 cores of 30% of the pods
+    - name: pod-cpu-hog
+      spec:
+        components:
+          experimentImage: litmuschaos/go-runner:3.31.0
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: "120"
             - name: CPU_CORES
               value: "2"
             - name: CPU_LOAD
               value: "80"
             - name: PODS_AFFECTED_PERC
               value: "30"
+            - name: CONTAINER_RUNTIME
+              value: containerd
+            - name: SOCKET_PATH
+              value: /run/containerd/containerd.sock
         probe:
-          # Verify SLO: p95 latency stays below 2x normal during fault
-          - name: latency-slo-probe
+          - name: availability-under-cpu-stress
             type: httpProbe
-            httpProbe/inputs:
-              url: "http://prometheus.monitoring.svc.cluster.local:9090/api/v1/query?query=histogram_quantile(0.95,rate(http_request_duration_seconds_bucket[1m]))"
-              responseTimeout: 10000
-              method:
-                get:
-                  criteria: "<"
-                  responseCode: "200"
             mode: Continuous
             runProperties:
-              probeTimeout: 10
-              interval: 15
+              probeTimeout: 10s
+              interval: 5s
               retry: 2
               stopOnFailure: false
-
-          # Verify service still responds (degraded is acceptable, down is not)
-          - name: service-liveness-probe
-            type: httpProbe
             httpProbe/inputs:
-              url: "http://my-api-service.production.svc.cluster.local/healthz"
-              responseTimeout: 5000
+              url: http://my-api-service.chaos-demo.svc.cluster.local/
+              insecureSkipVerify: false
               method:
                 get:
                   criteria: "=="
                   responseCode: "200"
-            mode: Continuous
-            runProperties:
-              probeTimeout: 5
-              interval: 10
-              retry: 5
-              stopOnFailure: false
 
-          # Verify circuit breaker opens under stress
-          - name: circuit-breaker-probe
-            type: cmdProbe
-            cmdProbe/inputs:
-              command: >
-                curl -sf http://my-api-service.production.svc.cluster.local/internal/circuit-breaker/status
-                | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get('state') in ['closed','open','half-open'] else 1)"
-              comparator:
-                type: int
-                criteria: "=="
-                value: "0"
-            mode: Edge
-            runProperties:
-              probeTimeout: 10
-              interval: 20
-              retry: 3
-              stopOnFailure: false
-
-    # Experiment 2: disk fill (runs after experiment 1 completes)
-    - name: disk-fill-pressure
+    # 3. Disk: fill 80% of the ephemeral storage limit of 30% of the pods
+    - name: disk-fill
       spec:
         components:
+          experimentImage: litmuschaos/go-runner:3.31.0
           env:
             - name: TOTAL_CHAOS_DURATION
               value: "60"
-            - name: EPHEMERAL_STORAGE_MEBIBYTES
-              value: "500"
+            - name: FILL_PERCENTAGE
+              value: "80"
             - name: PODS_AFFECTED_PERC
-              value: "50"
+              value: "30"
+            - name: CONTAINER_RUNTIME
+              value: containerd
+            - name: SOCKET_PATH
+              value: /run/containerd/containerd.sock
         probe:
-          - name: disk-alert-probe
-            type: promProbe
-            promProbe/inputs:
-              endpoint: "http://prometheus.monitoring.svc.cluster.local:9090"
-              query: >
-                (kubelet_volume_stats_used_bytes{namespace="production"}
-                / kubelet_volume_stats_capacity_bytes{namespace="production"}) * 100
-              comparator:
-                type: float
-                criteria: "<="
-                value: "95"              # alert if >95% disk used
-            mode: Edge
+          - name: deployment-present-probe
+            type: k8sProbe
+            mode: EOT
             runProperties:
-              probeTimeout: 15
-              interval: 15
-              retry: 2
-              stopOnFailure: false
-
----
-# =============================================================================
-# ChaosSchedule: run multi-fault experiment weekly in staging
-# =============================================================================
-apiVersion: litmuschaos.io/v1alpha1
-kind: ChaosSchedule
-metadata:
-  name: weekly-multi-fault-chaos
-  namespace: staging
-spec:
-  schedule:
-    now: false
-    repeat:
-      properties:
-        minChaosInterval: "168h"   # at most once per week
-      workHours:
-        includedHours: "2-4"       # run between 02:00-04:00 UTC
-      workDays:
-        includedDays: "Sat"        # only on Saturdays
-  engineTemplateSpec:
-    appinfo:
-      appns: staging
-      applabel: "app=my-api-service"
-      appkind: deployment
-    engineState: active
-    chaosServiceAccount: pod-delete-sa
-    monitoring: true
-    jobCleanUpPolicy: delete
-    experiments:
-      - name: network-partition-and-cpu-stress
-        spec:
-          components:
-            env:
-              - name: TOTAL_CHAOS_DURATION
-                value: "120"
-              - name: NETWORK_LATENCY
-                value: "1000"
-              - name: CPU_LOAD
-                value: "60"
-              - name: PODS_AFFECTED_PERC
-                value: "50"
+              probeTimeout: 5s
+              interval: 2s
+              retry: 1
+            k8sProbe/inputs:
+              group: apps
+              version: v1
+              resource: deployments
+              namespace: chaos-demo
+              fieldSelector: "metadata.name=my-api-service"
+              operation: present

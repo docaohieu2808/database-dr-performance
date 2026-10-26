@@ -5,13 +5,17 @@
 # Install:
 #   helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts
 #   helm repo update
-#   helm install velero vmware-tanzu/velero \
+#   helm install velero vmware-tanzu/velero --version 12.2.1 \
 #     --namespace velero --create-namespace \
 #     --values l1-velero-install-helm-values.yaml
+#
+# Pinned: chart 12.2.1, Velero v1.18.4, velero-plugin-for-aws v1.14.4 (checked 2026-10-26).
+# CI installs this file on a kind cluster with ci/velero-kind-values.yaml layered on top
+# (S3-compatible store instead of AWS) and runs a real backup / delete / restore.
 
 image:
   repository: velero/velero
-  tag: v1.13.0
+  tag: v1.18.4
   pullPolicy: IfNotPresent
 
 # Number of Velero server replicas
@@ -29,7 +33,7 @@ resources:
 # Velero feature flags
 initContainers:
   - name: velero-plugin-for-aws
-    image: velero/velero-plugin-for-aws:v1.9.0
+    image: velero/velero-plugin-for-aws:v1.14.4
     imagePullPolicy: IfNotPresent
     volumeMounts:
       - mountPath: /target
@@ -93,7 +97,9 @@ serviceAccount:
     annotations:
       eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/VeleroRole
 
-# Node agent (formerly restic) for file-system level backup
+# Node agent (formerly restic) for file-system level backup of volumes.
+# Set deployNodeAgent: true to run it (needed for defaultVolumesToFsBackup).
+deployNodeAgent: false
 nodeAgent:
   podVolumePath: /var/lib/kubelet/pods
   privileged: false
@@ -141,10 +147,8 @@ upgradeCRDs: true
 # Cleanup old CRDs on uninstall
 cleanUpCRDs: false
 
-# Extra environment variables for Velero server
-extraEnvVars: {}
-#  GOOGLE_APPLICATION_CREDENTIALS: /credentials/gcp-credentials.json
-
-# Extra volumes (e.g. for GCP service account)
-extraVolumes: []
-extraVolumeMounts: []
+# Extra environment variables for the Velero server (chart key: configuration.extraEnvVars)
+# configuration:
+#   extraEnvVars:
+#     - name: GOOGLE_APPLICATION_CREDENTIALS
+#       value: /credentials/gcp-credentials.json

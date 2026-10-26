@@ -4,12 +4,12 @@
 #
 # Deploy all functions:
 #   gcloud functions deploy <function-name> --gen2 --region us-central1 \
-#     --runtime nodejs20 --trigger-http --allow-unauthenticated
+#     --runtime nodejs24 --trigger-http --allow-unauthenticated
 #
 # Or via config (gcloud functions deploy reads these flags):
 #   gcloud functions deploy myapp-http-handler \
 #     --gen2 --region us-central1 \
-#     --runtime nodejs20 \
+#     --runtime nodejs24 \
 #     --source ./functions/http-handler \
 #     --entry-point handler \
 #     --trigger-http \
@@ -29,7 +29,7 @@ functions:
   # -------------------------------------------------------------------------
   - name: myapp-http-handler
     region: us-central1
-    runtime: nodejs20
+    runtime: nodejs24
     entryPoint: handler
     source: ./functions/http-handler
     trigger:
@@ -67,7 +67,7 @@ functions:
   # -------------------------------------------------------------------------
   - name: myapp-pubsub-processor
     region: us-central1
-    runtime: nodejs20
+    runtime: nodejs24
     entryPoint: processPubSubMessage
     source: ./functions/pubsub-processor
     trigger:
@@ -134,7 +134,7 @@ functions:
   # -------------------------------------------------------------------------
   - name: myapp-firestore-trigger
     region: us-central1
-    runtime: nodejs20
+    runtime: nodejs24
     entryPoint: onDocumentWrite
     source: ./functions/firestore-trigger
     trigger:

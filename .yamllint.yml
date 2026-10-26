@@ -1,0 +1,8 @@
+extends: relaxed
+rules:
+  line-length:
+    max: 200
+    level: error
+  indentation:
+    spaces: consistent
+    indent-sequences: consistent

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# WAL-G continuous backup to S3 (or S3-compatible storage)
+# WAL-G continuous backup to S3 (or S3-compatible storage).
+# Alternative to the pgBackRest lab in l5-pitr-pgbackrest.yml; needs a real bucket,
+# so it is shellchecked in CI but not executed there.
 # Supports: base backups, WAL archiving, PITR restore
 # Requires: wal-g binary, AWS credentials, PostgreSQL >= 12
 
@@ -10,8 +12,9 @@ set -euo pipefail
 ###############################################################################
 export WALG_S3_PREFIX="${WALG_S3_PREFIX:-s3://my-pg-backups/walg}"
 export AWS_REGION="${AWS_REGION:-us-east-1}"
-export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID is required}"
-export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY is required}"
+# Credentials are checked in require_credentials (so `help` and `wal-archive` stay usable)
+export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}"
+export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}"
 # For S3-compatible (MinIO, Ceph, etc.)
 # export AWS_ENDPOINT="${AWS_ENDPOINT:-http://minio:9000}"
 # export WALG_S3_CA_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
@@ -28,19 +31,20 @@ export WALG_UPLOAD_DISK_CONCURRENCY="${WALG_UPLOAD_DISK_CONCURRENCY:-2}"
 export WALG_DELTA_MAX_STEPS="${WALG_DELTA_MAX_STEPS:-7}"
 export WALG_DELTA_ORIGIN="${WALG_DELTA_ORIGIN:-LATEST}"
 
-# Retention: keep last N full backups
-export WALG_RETAIN_FULL_BACKUP_COUNT="${WALG_RETAIN_FULL_BACKUP_COUNT:-7}"
+# Retention: keep last N full backups (a variable of THIS script, not a wal-g setting)
+ WALG_RETAIN_FULL_BACKUP_COUNT="${WALG_RETAIN_FULL_BACKUP_COUNT:-7}"
 
 # PostgreSQL connection
 export PGHOST="${PGHOST:-localhost}"
 export PGPORT="${PGPORT:-5432}"
 export PGUSER="${PGUSER:-postgres}"
-export PGPASSWORD="${PGPASSWORD:?PGPASSWORD is required}"
+export PGPASSWORD="${PGPASSWORD:-}"   # only psql needs it; wal-push does not
 export PGDATABASE="${PGDATABASE:-postgres}"
 export PGDATA="${PGDATA:-/var/lib/postgresql/data}"
 
 WALG_BIN="${WALG_BIN:-/usr/local/bin/wal-g}"
-LOG_FILE="${LOG_FILE:-/var/log/walg-backup.log}"
+# Default log in /tmp: the postgres user running archive_command cannot write /var/log
+LOG_FILE="${LOG_FILE:-${TMPDIR:-/tmp}/walg-backup.log}"
 
 ###############################################################################
 # Logging
@@ -49,11 +53,18 @@ log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*" | tee -a "$LOG_FILE"; }
 err() { log "ERROR: $*" >&2; }
 die() { err "$*"; exit 1; }
 
+require_credentials() {
+    [[ -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]] \
+        || die "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are required"
+}
+
 ###############################################################################
 # Preflight checks
 ###############################################################################
 check_prerequisites() {
     log "Checking prerequisites..."
+    require_credentials
+    [[ -n "$PGPASSWORD" ]] || die "PGPASSWORD is required"
     [[ -x "$WALG_BIN" ]] || die "wal-g not found at $WALG_BIN"
     command -v psql >/dev/null 2>&1 || die "psql not found"
     psql -c "SELECT 1" >/dev/null 2>&1 || die "Cannot connect to PostgreSQL"
@@ -87,6 +98,7 @@ run_delta_backup() {
 run_wal_archive() {
     local wal_path="${1:?WAL path required}"
     local wal_file="${2:?WAL filename required}"
+    require_credentials
     log "Archiving WAL segment: $wal_file"
     "$WALG_BIN" wal-push "$wal_path" 2>&1 | tee -a "$LOG_FILE"
     log "WAL archived: $wal_file"
@@ -110,6 +122,7 @@ run_restore() {
     local backup_name="${1:-LATEST}"
     local target_time="${2:-}"
 
+    require_credentials
     log "Starting restore from backup: $backup_name"
     [[ -d "$PGDATA" && "$(ls -A "$PGDATA")" ]] && \
         die "PGDATA $PGDATA is not empty. Stop PostgreSQL and clear it first."
@@ -218,9 +231,9 @@ case "$CMD" in
     base-backup)      check_prerequisites; run_base_backup ;;
     delta-backup)     check_prerequisites; run_delta_backup ;;
     wal-archive)      run_wal_archive "$@" ;;
-    list)             list_backups ;;
+    list)             require_credentials; list_backups ;;
     restore)          run_restore "$@" ;;
-    delete-old)       run_delete_old ;;
+    delete-old)       require_credentials; run_delete_old ;;
     configure-pg)     configure_postgres_wal_archiving ;;
     cron-schedule)    print_cron_schedule ;;
     help|--help|-h)   usage ;;

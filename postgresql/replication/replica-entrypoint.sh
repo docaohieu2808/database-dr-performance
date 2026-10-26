@@ -11,6 +11,14 @@ REPLICATION_USER="${REPLICATION_USER:-replicator}"
 REPLICATION_PASSWORD="${REPLICATION_PASSWORD:-repl_secret}"
 PGDATA="${PGDATA:-/var/lib/postgresql/data/pgdata}"
 
+# Passwordless-in-conninfo: both pg_basebackup and the running walreceiver read the
+# replication password from this file (so it must exist on every start).
+PGPASSFILE="/tmp/.pgpass_replica"
+echo "${PRIMARY_HOST}:${PRIMARY_PORT}:replication:${REPLICATION_USER}:${REPLICATION_PASSWORD}" \
+  > "${PGPASSFILE}"
+chmod 0600 "${PGPASSFILE}"
+export PGPASSFILE
+
 if [ ! -s "${PGDATA}/PG_VERSION" ]; then
   echo "[replica-entrypoint] PGDATA is empty — performing base backup from ${PRIMARY_HOST}:${PRIMARY_PORT}"
 
@@ -20,13 +28,6 @@ if [ ! -s "${PGDATA}/PG_VERSION" ]; then
     sleep 2
   done
 
-  # Write .pgpass so pg_basebackup can authenticate without a password prompt
-  PGPASSFILE="/tmp/.pgpass_replica"
-  echo "${PRIMARY_HOST}:${PRIMARY_PORT}:replication:${REPLICATION_USER}:${REPLICATION_PASSWORD}" \
-    > "${PGPASSFILE}"
-  chmod 0600 "${PGPASSFILE}"
-  export PGPASSFILE
-
   pg_basebackup \
     -h "${PRIMARY_HOST}" \
     -p "${PRIMARY_PORT}" \
@@ -35,7 +36,7 @@ if [ ! -s "${PGDATA}/PG_VERSION" ]; then
     -Fp \
     -Xs \
     -P \
-    -R   # writes recovery.conf / standby.signal + primary_conninfo automatically
+    -R   # writes standby.signal + primary_conninfo (no password) automatically
 
   chmod 0700 "${PGDATA}"
   echo "[replica-entrypoint] Base backup complete."

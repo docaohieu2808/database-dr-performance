@@ -1,39 +1,30 @@
-# Patroni HA image — PostgreSQL 16 + Patroni 3.x + etcd client
-# Build: docker build -t patroni:latest ./patroni
-# NOTE: Patroni kept as learning material; production fleet uses docker pg17-alpine standalone.
-FROM python:3.12-slim
+# Patroni HA image: official PostgreSQL 18 image + Patroni (etcd3 DCS) + pgBackRest.
+# Build: docker build -t patroni-pg18:local ./patroni
+FROM postgres:18
 
-ARG PATRONI_VERSION=3.3.2
-ARG PG_MAJOR=16
+ARG PATRONI_VERSION=4.1.5
 
-# Install PostgreSQL client + server binaries
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      curl \
-      gnupg \
-      lsb-release \
-      procps \
-    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-         | gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg \
-    && echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
-         > /etc/apt/sources.list.d/pgdg.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-         postgresql-${PG_MAJOR} \
-         postgresql-client-${PG_MAJOR} \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-venv pgbackrest \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /opt/patroni \
+    && /opt/patroni/bin/pip install --no-cache-dir \
+         "patroni[etcd3]==${PATRONI_VERSION}" "psycopg[binary]==3.3.6"
 
-# Install Patroni with etcd extras
-RUN pip install --no-cache-dir \
-      "patroni[etcd]==${PATRONI_VERSION}" \
-      psycopg2-binary
+ENV PATH="/opt/patroni/bin:${PATH}"
 
-# Add postgres binaries to PATH
-ENV PATH="/usr/lib/postgresql/${PG_MAJOR}/bin:${PATH}"
+COPY pgbackrest.conf /etc/pgbackrest/pgbackrest.conf
+COPY pgbackrest-stanza-create.sh /usr/local/bin/pgbackrest-stanza-create.sh
 
-# Patroni config is bind-mounted at runtime (see docker-compose)
-RUN mkdir -p /etc/patroni /var/lib/postgresql/data
-RUN chown -R postgres:postgres /var/lib/postgresql
+# /data is NOT a declared VOLUME in the base image, so ownership set here is kept
+# when a named volume is mounted on top of it.
+RUN mkdir -p /data /var/lib/pgbackrest /etc/patroni \
+    && chown -R postgres:postgres /data /var/lib/pgbackrest \
+    && chmod 700 /data \
+    && chmod +x /usr/local/bin/pgbackrest-stanza-create.sh
 
 USER postgres
+STOPSIGNAL SIGTERM
 EXPOSE 5432 8008
 
 ENTRYPOINT ["patroni", "/etc/patroni/patroni.yml"]

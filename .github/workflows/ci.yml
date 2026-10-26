@@ -1,0 +1,262 @@
+# Proves every level of the ladder, on every push and once a week:
+# - static: actionlint, shellcheck, yamllint, hadolint, compose config, haproxy -c, kubeconform,
+#   cfn-lint, k6 inspect, Locust import, action pins;
+# - postgres-replication: l1 + l2 streaming replication + l4 PgBouncer;
+# - patroni-failover: l3 3-node cluster, kill the leader, replica promoted, writes continue;
+# - postgres-pitr: l5 WAL archiving, base backup, DROP TABLE, point-in-time restore;
+# - postgres-extension: l-max, build the C extension with pgxs and test it;
+# - redis (Redis 8 and Valkey 9): basic + ACL, Sentinel failover, Cluster;
+# - mongodb: standalone, replica-set election, sharded cluster;
+# - velero: kind cluster, backup / delete namespace / restore / restore drill;
+# - litmus: kind cluster, pod-delete chaos with probes.
+name: ci
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "41 2 * * 1"   # Mondays 02:41 UTC = 09:41 Asia/Saigon
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install Python tooling
+        run: pip install -r requirements-lint.txt -r performance-chaos/requirements.txt
+
+      - name: actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+        run: |
+          bash <(curl -sSfL "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash") "$ACTIONLINT_VERSION"
+          ./actionlint -color
+
+      - name: shellcheck
+        run: shellcheck -x -P SCRIPTDIR $(git ls-files '*.sh')
+
+      - name: yamllint
+        run: yamllint --strict -c .yamllint.yml .
+
+      - name: docker compose config (every compose file)
+        run: |
+          for f in postgresql/l*.yml redis/l*.yml mongodb/l*.yml; do
+            echo "== $f"
+            docker compose -f "$f" config -q
+          done
+
+      - name: hadolint
+        run: |
+          for f in postgresql/patroni/Dockerfile postgresql/pitr/Dockerfile postgresql/pgbouncer/Dockerfile postgresql/l-max-custom-extension/Dockerfile; do
+            echo "== $f"
+            docker run --rm -i -v "$PWD/.hadolint.yaml:/.hadolint.yaml:ro" hadolint/hadolint:v2.15.1 hadolint --config /.hadolint.yaml - < "$f"
+          done
+
+      - name: haproxy -c
+        run: |
+          docker run --rm \
+            --add-host patroni1:127.0.0.1 --add-host patroni2:127.0.0.1 --add-host patroni3:127.0.0.1 \
+            -v "$PWD/postgresql/patroni/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro" \
+            haproxy:3.4-alpine haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+
+      - name: JSON configs parse
+        run: |
+          for f in $(git ls-files 'cloud-platforms/**/*.json'); do jq empty "$f"; echo "ok $f"; done
+
+      - name: cfn-lint (SAM template)
+        run: cfn-lint cloud-platforms/aws/lambda-sam-template.yaml
+
+      - name: kubeconform (Kubernetes + Velero + Knative manifests)
+        env:
+          KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+        run: |
+          curl -fsSL -o kc.tgz https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz
+          echo "$KUBECONFORM_SHA256  kc.tgz" | sha256sum -c -
+          tar -xzf kc.tgz kubeconform
+          # CRD schemas come from the datree catalog. Litmus CRDs are not in it; they are
+          # checked against the real CRDs by the litmus job. The Cloud Run Job document uses
+          # a Google-specific API with no schema, hence -skip Job.
+          ./kubeconform -strict -summary -kubernetes-version 1.34.0 -skip Job \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            disaster-recovery/l2-velero-schedule-backup.yaml \
+            disaster-recovery/l4-multi-region-strategy.yaml \
+            disaster-recovery/ci/seaweedfs.yaml \
+            cloud-platforms/gcp/cloud-run-service.yaml
+
+      - name: k6 inspect (scripts parse, options valid)
+        env:
+          K6_SHA256: 39c3117b6af817592dcd0ce4242105c0a7af10948c2a425306f0be8f7a8a8ab1
+        run: |
+          curl -fsSL -o k6.tgz https://github.com/grafana/k6/releases/download/v2.3.0/k6-v2.3.0-linux-amd64.tar.gz
+          echo "$K6_SHA256  k6.tgz" | sha256sum -c -
+          tar -xzf k6.tgz --strip-components=1 k6-v2.3.0-linux-amd64/k6
+          ./k6 version
+          ./k6 inspect performance-chaos/l1-k6-load-test.js > /dev/null
+          ./k6 inspect performance-chaos/l2-k6-advanced-scenarios.js > /dev/null
+
+      - name: Locust file imports and registers its user classes
+        run: |
+          python -m py_compile performance-chaos/l3-locust-distributed.py
+          locust --version
+          python - <<'PY'
+          import importlib.util
+          spec = importlib.util.spec_from_file_location("l3", "performance-chaos/l3-locust-distributed.py")
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          users = [n for n in dir(mod) if n.endswith("User") and n != "HttpUser"]
+          print("user classes:", users)
+          assert users, "no Locust user classes found"
+          PY
+
+      - name: Every action is pinned to a commit SHA that exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # An annotated tag object's SHA looks like a commit SHA but fails when a job runs, so ask the API.
+          refs=$(grep -rhE '^[[:space:]]*(- )?uses: *[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@' .github \
+            | sed -E 's/^[[:space:]]*(- )?uses: *//; s/[[:space:]].*$//' | sort -u)
+          status=0
+          while IFS=@ read -r ref sha; do
+            repo=$(echo "$ref" | cut -d/ -f1-2)
+            if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then echo "FAIL $ref@$sha is not pinned to a SHA"; status=1
+            elif gh api "repos/$repo/commits/$sha" --jq .sha >/dev/null 2>&1; then echo "ok   $ref@$sha"
+            else echo "FAIL $ref@$sha is not a commit"; status=1; fi
+          done <<< "$refs"
+          exit "$status"
+
+  postgres-replication:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: tests/postgres-replication-pooler.sh
+
+  patroni-failover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: patroni --validate-config
+        working-directory: postgresql
+        run: |
+          docker compose -f l3-patroni-ha-cluster.yml build patroni1
+          docker compose -f l3-patroni-ha-cluster.yml run --rm --no-deps --entrypoint patroni patroni1 \
+            --validate-config /etc/patroni/patroni.yml
+      - run: tests/patroni-failover.sh
+
+  postgres-pitr:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: tests/pitr-pgbackrest.sh
+
+  postgres-extension:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: tests/pg-extension.sh
+
+  redis:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["redis:8.10-alpine", "valkey/valkey:9.1-alpine"]
+        test: [redis-basic-and-acl, redis-sentinel-failover, redis-cluster-smoke]
+    env:
+      REDIS_IMAGE: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: tests/${{ matrix.test }}.sh
+
+  mongodb:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        test: [mongo-basic, mongo-replica-election, mongo-sharded-smoke]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: tests/${{ matrix.test }}.sh
+
+  velero:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      VELERO_VERSION: v1.18.4
+      VELERO_SHA256: e520c17d8997e1c9d0a28ae013592e4473ca3bd82cb3acd132e51286263f74bf
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.22.1
+      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          version: v0.33.0
+          cluster_name: dr
+      - name: Install the velero CLI
+        run: |
+          curl -fsSL -o velero.tgz "https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz"
+          echo "$VELERO_SHA256  velero.tgz" | sha256sum -c -
+          tar -xzf velero.tgz --strip-components=1 "velero-${VELERO_VERSION}-linux-amd64/velero"
+          sudo install velero /usr/local/bin/velero
+          velero version --client-only
+      - run: tests/velero-backup-restore.sh
+      - name: Velero logs on failure
+        if: failure()
+        run: |
+          kubectl -n velero get pods,backups,restores,backupstoragelocations || true
+          kubectl -n velero logs deployment/velero --tail=100 || true
+
+  litmus:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.22.1
+      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          version: v0.33.0
+          cluster_name: chaos
+      - run: tests/litmus-pod-delete.sh
+      - name: Litmus state on failure
+        if: failure()
+        run: |
+          kubectl -n chaos-demo get pods,chaosengines,chaosresults -o wide || true
+          kubectl -n litmus logs deployment/litmus --tail=100 || true

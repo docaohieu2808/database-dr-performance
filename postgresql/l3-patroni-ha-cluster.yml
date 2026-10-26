@@ -1,145 +1,122 @@
-version: "3.9"
+name: patroni-ha
 
-# Patroni 3-node HA Cluster with etcd as DCS
-# Automatic leader election, failover, and switchover
-# Nodes: patroni1 (initial primary), patroni2, patroni3
+# Patroni 4 HA cluster: 3 PostgreSQL 18 nodes, a single-node etcd as the DCS and
+# HAProxy in front. WAL is archived with pgBackRest into a volume shared by all nodes.
+# Passwords are lab defaults; override them via .env before using anything real.
+
+x-patroni: &patroni
+  image: patroni-pg18:local
+  build:
+    context: ./patroni
+  restart: unless-stopped
+  networks: [patroni-net]
+  depends_on:
+    etcd:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432"]
+    interval: 10s
+    timeout: 5s
+    retries: 12
+    start_period: 40s
+
+x-patroni-env: &patroni-env
+  PATRONI_ETCD3_HOST: etcd:2379
+  PATRONI_SCOPE: postgres-ha
+  PATRONI_RESTAPI_LISTEN: 0.0.0.0:8008
+  PATRONI_RESTAPI_USERNAME: patroni
+  PATRONI_RESTAPI_PASSWORD: ${PATRONI_REST_PASSWORD:-rest-lab-password}
+  PATRONI_POSTGRESQL_LISTEN: 0.0.0.0:5432
+  PATRONI_POSTGRESQL_DATA_DIR: /data/pgdata
+  PATRONI_SUPERUSER_USERNAME: postgres
+  PATRONI_SUPERUSER_PASSWORD: ${PG_SUPERUSER_PASSWORD:-superpassword}
+  PATRONI_REPLICATION_USERNAME: replicator
+  PATRONI_REPLICATION_PASSWORD: ${PG_REPLICATION_PASSWORD:-replpassword}
 
 services:
-  # Distributed Configuration Store
+  # Distributed configuration store (leader lock + cluster state)
   etcd:
-    image: bitnami/etcd:3.5
+    image: quay.io/coreos/etcd:v3.7.3
     container_name: etcd
     restart: unless-stopped
-    environment:
-      ETCD_NAME: etcd0
-      ETCD_DATA_DIR: /etcd-data
-      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
-      ETCD_ADVERTISE_CLIENT_URLS: http://etcd:2379
-      ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
-      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd:2380
-      ETCD_INITIAL_CLUSTER: etcd0=http://etcd:2380
-      ETCD_INITIAL_CLUSTER_STATE: new
-      ETCD_INITIAL_CLUSTER_TOKEN: patroni-cluster-token
-      ALLOW_NONE_AUTHENTICATION: "yes"
+    command:
+      - etcd
+      - --name=etcd0
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
     volumes:
       - etcd-data:/etcd-data
-    networks:
-      - patroni-net
+    networks: [patroni-net]
     healthcheck:
-      test: ["CMD", "etcdctl", "endpoint", "health"]
-      interval: 10s
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   patroni1:
-    image: patroni:latest
-    build:
-      context: ./patroni
-      dockerfile: Dockerfile
+    <<: *patroni
     container_name: patroni1
-    restart: unless-stopped
     hostname: patroni1
     environment:
+      <<: *patroni-env
       PATRONI_NAME: patroni1
-      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni1:5432
       PATRONI_RESTAPI_CONNECT_ADDRESS: patroni1:8008
-      PATRONI_ETCD_URL: http://etcd:2379
-      PATRONI_SUPERUSER_USERNAME: postgres
-      PATRONI_SUPERUSER_PASSWORD: ${PG_SUPERUSER_PASSWORD:-superpassword}
-      PATRONI_REPLICATION_USERNAME: replicator
-      PATRONI_REPLICATION_PASSWORD: ${PG_REPLICATION_PASSWORD:-replpassword}
-      PATRONI_SCOPE: postgres-ha
-      PATRONI_POSTGRESQL_DATA_DIR: /var/lib/postgresql/data
-      PATRONI_POSTGRESQL_PGPASS: /tmp/pgpass
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni1:5432
     volumes:
-      - patroni1-data:/var/lib/postgresql/data
+      - patroni1-data:/data
+      - pgbackrest-repo:/var/lib/pgbackrest
       - ./patroni/patroni.yml:/etc/patroni/patroni.yml:ro
     ports:
-      - "5432:5432"
-      - "8008:8008"
-    networks:
-      - patroni-net
-    depends_on:
-      etcd:
-        condition: service_healthy
+      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:8008:8008"
 
   patroni2:
-    image: patroni:latest
-    build:
-      context: ./patroni
-      dockerfile: Dockerfile
+    <<: *patroni
     container_name: patroni2
-    restart: unless-stopped
     hostname: patroni2
     environment:
+      <<: *patroni-env
       PATRONI_NAME: patroni2
-      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni2:5432
       PATRONI_RESTAPI_CONNECT_ADDRESS: patroni2:8008
-      PATRONI_ETCD_URL: http://etcd:2379
-      PATRONI_SUPERUSER_USERNAME: postgres
-      PATRONI_SUPERUSER_PASSWORD: ${PG_SUPERUSER_PASSWORD:-superpassword}
-      PATRONI_REPLICATION_USERNAME: replicator
-      PATRONI_REPLICATION_PASSWORD: ${PG_REPLICATION_PASSWORD:-replpassword}
-      PATRONI_SCOPE: postgres-ha
-      PATRONI_POSTGRESQL_DATA_DIR: /var/lib/postgresql/data
-      PATRONI_POSTGRESQL_PGPASS: /tmp/pgpass
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni2:5432
     volumes:
-      - patroni2-data:/var/lib/postgresql/data
+      - patroni2-data:/data
+      - pgbackrest-repo:/var/lib/pgbackrest
       - ./patroni/patroni.yml:/etc/patroni/patroni.yml:ro
     ports:
-      - "5433:5432"
-      - "8009:8008"
-    networks:
-      - patroni-net
-    depends_on:
-      etcd:
-        condition: service_healthy
+      - "127.0.0.1:5433:5432"
+      - "127.0.0.1:8009:8008"
 
   patroni3:
-    image: patroni:latest
-    build:
-      context: ./patroni
-      dockerfile: Dockerfile
+    <<: *patroni
     container_name: patroni3
-    restart: unless-stopped
     hostname: patroni3
     environment:
+      <<: *patroni-env
       PATRONI_NAME: patroni3
-      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni3:5432
       PATRONI_RESTAPI_CONNECT_ADDRESS: patroni3:8008
-      PATRONI_ETCD_URL: http://etcd:2379
-      PATRONI_SUPERUSER_USERNAME: postgres
-      PATRONI_SUPERUSER_PASSWORD: ${PG_SUPERUSER_PASSWORD:-superpassword}
-      PATRONI_REPLICATION_USERNAME: replicator
-      PATRONI_REPLICATION_PASSWORD: ${PG_REPLICATION_PASSWORD:-replpassword}
-      PATRONI_SCOPE: postgres-ha
-      PATRONI_POSTGRESQL_DATA_DIR: /var/lib/postgresql/data
-      PATRONI_POSTGRESQL_PGPASS: /tmp/pgpass
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: patroni3:5432
     volumes:
-      - patroni3-data:/var/lib/postgresql/data
+      - patroni3-data:/data
+      - pgbackrest-repo:/var/lib/pgbackrest
       - ./patroni/patroni.yml:/etc/patroni/patroni.yml:ro
     ports:
-      - "5434:5432"
-      - "8010:8008"
-    networks:
-      - patroni-net
-    depends_on:
-      etcd:
-        condition: service_healthy
+      - "127.0.0.1:5434:5432"
+      - "127.0.0.1:8010:8008"
 
-  # HAProxy routes writes to leader, reads to replicas
+  # HAProxy: :5000 follows the primary, :5001 balances replicas, :7000 stats
   haproxy:
-    image: haproxy:2.8-alpine
+    image: haproxy:3.4-alpine
     container_name: haproxy-patroni
     restart: unless-stopped
     volumes:
       - ./patroni/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     ports:
-      - "5000:5000"   # primary (read-write)
-      - "5001:5001"   # replicas (read-only)
-      - "7000:7000"   # HAProxy stats
-    networks:
-      - patroni-net
+      - "127.0.0.1:5000:5000"
+      - "127.0.0.1:5001:5001"
+      - "127.0.0.1:7000:7000"
+    networks: [patroni-net]
     depends_on:
       - patroni1
       - patroni2
@@ -150,84 +127,8 @@ volumes:
   patroni1-data:
   patroni2-data:
   patroni3-data:
+  pgbackrest-repo:
 
 networks:
   patroni-net:
     driver: bridge
-
-# --- patroni/patroni.yml (base config, env vars override) ---
-# scope: postgres-ha
-# namespace: /db/
-# name: ${PATRONI_NAME}
-#
-# restapi:
-#   listen: 0.0.0.0:8008
-#   connect_address: ${PATRONI_RESTAPI_CONNECT_ADDRESS}
-#
-# etcd:
-#   url: ${PATRONI_ETCD_URL}
-#
-# bootstrap:
-#   dcs:
-#     ttl: 30
-#     loop_wait: 10
-#     retry_timeout: 10
-#     maximum_lag_on_failover: 1048576
-#     postgresql:
-#       use_pg_rewind: true
-#       use_slots: true
-#       parameters:
-#         wal_level: replica
-#         hot_standby: "on"
-#         max_wal_senders: 10
-#         max_replication_slots: 10
-#         wal_log_hints: "on"
-#   initdb:
-#     - encoding: UTF8
-#     - data-checksums
-#
-# postgresql:
-#   listen: 0.0.0.0:5432
-#   connect_address: ${PATRONI_POSTGRESQL_CONNECT_ADDRESS}
-#   data_dir: ${PATRONI_POSTGRESQL_DATA_DIR}
-#   pgpass: ${PATRONI_POSTGRESQL_PGPASS}
-#   authentication:
-#     replication:
-#       username: ${PATRONI_REPLICATION_USERNAME}
-#       password: ${PATRONI_REPLICATION_PASSWORD}
-#     superuser:
-#       username: ${PATRONI_SUPERUSER_USERNAME}
-#       password: ${PATRONI_SUPERUSER_PASSWORD}
-#
-# --- patroni/haproxy.cfg ---
-# global
-#   maxconn 100
-# defaults
-#   log global
-#   mode tcp
-#   retries 2
-#   timeout client 30m
-#   timeout connect 4s
-#   timeout server 30m
-#   timeout check 5s
-# listen stats
-#   mode http
-#   bind *:7000
-#   stats enable
-#   stats uri /
-# listen postgres-primary
-#   bind *:5000
-#   option httpchk GET /primary
-#   http-check expect status 200
-#   default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
-#   server patroni1 patroni1:5432 maxconn 100 check port 8008
-#   server patroni2 patroni2:5432 maxconn 100 check port 8008
-#   server patroni3 patroni3:5432 maxconn 100 check port 8008
-# listen postgres-replicas
-#   bind *:5001
-#   option httpchk GET /replica
-#   http-check expect status 200
-#   default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
-#   server patroni1 patroni1:5432 maxconn 100 check port 8008
-#   server patroni2 patroni2:5432 maxconn 100 check port 8008
-#   server patroni3 patroni3:5432 maxconn 100 check port 8008

@@ -1,68 +1,62 @@
-# patroni.yml — base config for Patroni 3.x HA cluster (learning material)
-# All sensitive values are overridden by environment variables at runtime.
-# NOTE: Patroni kept as learning material; production fleet uses docker pg17-alpine standalone.
+# Patroni 4.x base config (learning material). Per-node values (name, addresses,
+# passwords, data dir, DCS host) come from PATRONI_* environment variables in
+# l3-patroni-ha-cluster.yml, which override this file.
 #
-# Run: docker compose -f l3-patroni-ha-cluster.yml up -d
-# Status: patronictl -c /etc/patroni/patroni.yml list
-# Failover: patronictl -c /etc/patroni/patroni.yml failover postgres-ha
+# Status:   docker exec patroni1 patronictl -c /etc/patroni/patroni.yml list
+# Switchover: patronictl -c /etc/patroni/patroni.yml switchover postgres-ha
 
 scope: postgres-ha
 namespace: /db/
-name: ${PATRONI_NAME}
 
 restapi:
   listen: 0.0.0.0:8008
-  connect_address: ${PATRONI_RESTAPI_CONNECT_ADDRESS}
-  # authentication: (add in production)
-  # username: patroni
-  # password: ${PATRONI_REST_PASSWORD}
+  # REST credentials (needed for switchover/restart/reload; health GETs used by
+  # HAProxy stay open) come from PATRONI_RESTAPI_USERNAME / PATRONI_RESTAPI_PASSWORD.
 
-etcd:
-  url: ${PATRONI_ETCD_URL}
+etcd3:
+  host: etcd:2379
 
 bootstrap:
   dcs:
     ttl: 30
     loop_wait: 10
     retry_timeout: 10
-    maximum_lag_on_failover: 1048576   # 1 MB — replica can lag at most this before excluded
-    synchronous_mode: false            # set true for zero RPO (requires at least 1 sync replica)
+    maximum_lag_on_failover: 1048576   # 1 MB: a replica lagging more is not promoted
+    synchronous_mode: false            # true = zero RPO, needs a sync replica
     postgresql:
-      use_pg_rewind: true    # fast resync of old primary after failover
+      use_pg_rewind: true              # resync the old primary after failover
       use_slots: true
       parameters:
         wal_level: replica
         hot_standby: "on"
         max_wal_senders: 10
         max_replication_slots: 10
-        wal_log_hints: "on"            # required for pg_rewind
+        wal_log_hints: "on"            # required by pg_rewind
         archive_mode: "on"
-        archive_command: "/bin/true"   # replace with real WAL-G command in production
+        archive_command: "pgbackrest --stanza=main archive-push %p"
+        archive_timeout: 60
 
   initdb:
     - encoding: UTF8
-    - data-checksums           # enables page-level checksums, needed for pg_rewind
+    - data-checksums                   # required by pg_rewind together with wal_log_hints
 
   pg_hba:
-    - host replication replicator 0.0.0.0/0 md5
-    - host all all 0.0.0.0/0  md5
+    - local all postgres peer          # pgBackRest connects over the unix socket
+    - host replication replicator 0.0.0.0/0 scram-sha-256
+    - host all all 0.0.0.0/0 scram-sha-256
+
+  post_bootstrap: /usr/local/bin/pgbackrest-stanza-create.sh
 
 postgresql:
   listen: 0.0.0.0:5432
-  connect_address: ${PATRONI_POSTGRESQL_CONNECT_ADDRESS}
-  data_dir: ${PATRONI_POSTGRESQL_DATA_DIR}
-  pgpass: ${PATRONI_POSTGRESQL_PGPASS}
+  pgpass: /tmp/pgpass
   authentication:
     replication:
-      username: ${PATRONI_REPLICATION_USERNAME}
-      password: ${PATRONI_REPLICATION_PASSWORD}
+      username: replicator
     superuser:
-      username: ${PATRONI_SUPERUSER_USERNAME}
-      password: ${PATRONI_SUPERUSER_PASSWORD}
+      username: postgres
   parameters:
-    shared_buffers: 256MB
-    effective_cache_size: 1GB
-    checkpoint_completion_target: 0.9
+    shared_buffers: 128MB
     log_connections: "on"
     log_disconnections: "on"
 

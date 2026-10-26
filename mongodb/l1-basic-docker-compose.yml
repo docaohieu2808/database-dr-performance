@@ -1,52 +1,58 @@
-version: "3.9"
+name: mongo-basic
 
-# Single MongoDB instance with auth, WiredTiger tuning, and persistent storage
+# Single MongoDB 9.0 with auth, WiredTiger tuning and an init script (./init).
+# Mongo Express UI is opt-in: docker compose --profile ui up
+
 services:
   mongodb:
-    image: mongo:7.0
+    image: mongo:9.0
     container_name: mongodb-basic
     restart: unless-stopped
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-adminpassword}
-      MONGO_INITDB_DATABASE: ${MONGO_DB:-appdb}
+      MONGO_INITDB_DATABASE: appdb
+      MONGO_APP_PASSWORD: ${MONGO_APP_PASSWORD:-apppassword}
     ports:
-      - "27017:27017"
+      - "127.0.0.1:27017:27017"
     volumes:
       - mongodb-data:/data/db
       - mongodb-config:/data/configdb
       - ./init:/docker-entrypoint-initdb.d:ro
     command: >
-      mongod
-        --auth
-        --bind_ip_all
-        --wiredTigerCacheSizeGB 1
-        --wiredTigerJournalCompressor snappy
-        --wiredTigerCollectionBlockCompressor snappy
-        --wiredTigerIndexPrefixCompression true
-        --oplogSize 1024
-        --slowms 100
-        --profile 1
+      mongod --auth --bind_ip_all
+      --wiredTigerCacheSizeGB 1
+      --wiredTigerJournalCompressor snappy
+      --wiredTigerCollectionBlockCompressor snappy
+      --wiredTigerIndexPrefixCompression true
+      --slowms 100 --profile 1
     healthcheck:
-      test: >
-        mongosh --quiet --eval
-        "db.adminCommand('ping').ok"
-        --username ${MONGO_ROOT_USER:-admin}
-        --password ${MONGO_ROOT_PASSWORD:-adminpassword}
-        --authenticationDatabase admin
-      interval: 10s
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --username
+        - ${MONGO_ROOT_USER:-admin}
+        - --password
+        - ${MONGO_ROOT_PASSWORD:-adminpassword}
+        - --authenticationDatabase
+        - admin
+        - --eval
+        - db.adminCommand('ping').ok
+      interval: 5s
       timeout: 5s
-      retries: 5
-      start_period: 30s
+      retries: 20
+      start_period: 20s
     ulimits:
       nproc: 64000
       nofile:
         soft: 64000
         hard: 64000
 
-  # Mongo Express web UI
+  # Web UI (the 1.0.x line is the last stable; 1.1 is still release-candidate)
   mongo-express:
-    image: mongo-express:1.0
+    profiles: [ui]
+    image: mongo-express:1.0.2-20-alpine3.19
     container_name: mongo-express
     restart: unless-stopped
     environment:
@@ -56,7 +62,7 @@ services:
       ME_CONFIG_BASICAUTH_USERNAME: ${EXPRESS_USER:-admin}
       ME_CONFIG_BASICAUTH_PASSWORD: ${EXPRESS_PASSWORD:-expresspassword}
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
     depends_on:
       mongodb:
         condition: service_healthy
@@ -64,16 +70,3 @@ services:
 volumes:
   mongodb-data:
   mongodb-config:
-
-# --- init/01-create-app-user.js ---
-# db = db.getSiblingDB('appdb');
-# db.createUser({
-#   user: 'appuser',
-#   pwd: 'apppassword',
-#   roles: [
-#     { role: 'readWrite', db: 'appdb' },
-#     { role: 'dbAdmin', db: 'appdb' }
-#   ]
-# });
-# db.createCollection('events');
-# db.events.createIndex({ createdAt: 1 }, { expireAfterSeconds: 2592000 });

@@ -22,7 +22,7 @@ EOSQL
 
 echo "[primary-init] Adding pg_hba replication entry"
 # Allow replication from any address within the Docker network (172.x.x.x / 10.x.x.x)
-echo "host replication ${POSTGRES_REPLICATION_USER:-replicator} 0.0.0.0/0 md5" \
+echo "host replication ${POSTGRES_REPLICATION_USER:-replicator} 0.0.0.0/0 scram-sha-256" \
   >> "${PGDATA}/pg_hba.conf"
 
 echo "[primary-init] Reloading PostgreSQL config"

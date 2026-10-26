@@ -1,23 +1,32 @@
-version: "3.9"
+name: redis-basic
 
-# Single Redis instance with persistence (RDB + AOF) and basic security
+# Single Redis with RDB + AOF persistence and a password.
+# Switch to Valkey (BSD licensed fork) with: REDIS_IMAGE=valkey/valkey:9.1-alpine
+# (Redis 8 is AGPLv3 / RSALv2 / SSPLv1 tri-licensed; Valkey is the Linux Foundation fork.)
+
 services:
   redis:
-    image: redis:7.2-alpine
+    image: ${REDIS_IMAGE:-redis:8.10-alpine}
     container_name: redis-basic
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
       - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
-    command: redis-server /usr/local/etc/redis/redis.conf
+    command:
+      - redis-server
+      - /usr/local/etc/redis/redis.conf
+      - --requirepass
+      - ${REDIS_PASSWORD:-redispassword}
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:-redispassword}
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redispassword}", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     sysctls:
       net.core.somaxconn: 1024
     ulimits:
@@ -27,45 +36,3 @@ services:
 
 volumes:
   redis-data:
-    driver: local
-
-# --- redis.conf (create alongside this file) ---
-# bind 0.0.0.0
-# protected-mode yes
-# port 6379
-# requirepass redispassword
-#
-# # Persistence: RDB snapshots
-# save 900 1
-# save 300 10
-# save 60 10000
-# rdbcompression yes
-# rdbchecksum yes
-# dbfilename dump.rdb
-# dir /data
-#
-# # Persistence: AOF (Append Only File)
-# appendonly yes
-# appendfsync everysec
-# no-appendfsync-on-rewrite no
-# auto-aof-rewrite-percentage 100
-# auto-aof-rewrite-min-size 64mb
-# aof-rewrite-incremental-fsync yes
-#
-# # Memory
-# maxmemory 512mb
-# maxmemory-policy allkeys-lru
-# maxmemory-samples 5
-#
-# # Slow log
-# slowlog-log-slower-than 10000
-# slowlog-max-len 128
-#
-# # Limits
-# maxclients 1000
-# tcp-keepalive 300
-# timeout 0
-#
-# # Logging
-# loglevel notice
-# logfile ""

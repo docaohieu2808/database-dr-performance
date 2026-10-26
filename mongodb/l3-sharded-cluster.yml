@@ -1,309 +1,260 @@
-version: "3.9"
+name: mongo-sharded
 
-# MongoDB Sharded Cluster
-# Components:
-#   - Config Server Replica Set (csrs): 3 nodes — stores cluster metadata
-#   - Shard 1 Replica Set (shard1rs): 3 nodes — data partition 1
-#   - Shard 2 Replica Set (shard2rs): 3 nodes — data partition 2
-#   - mongos routers: 2 nodes — query routing layer (stateless)
-# Total: 11 containers
+# MongoDB 9.0 sharded cluster: config-server replica set (3), two shard replica
+# sets (3 each) and two mongos routers = 11 mongod/mongos processes + init jobs.
+# Needs about 3 GB RAM. Smoke test: tests/mongo-sharded-smoke.sh
+#
+# Start order: keyfile -> all mongod -> shard-init-rs (rs.initiate x3) -> mongos ->
+# shard-add (addShard + shardCollection appdb.events on hashed userId)
 
-x-mongo-shard-common: &mongo-shard-common
-  image: mongo:7.0
+x-mongo-common: &mongo-common
+  image: mongo:9.0
   restart: unless-stopped
+  environment: &mongo-env
+    MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
+    MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-adminpassword}
+  healthcheck:
+    # ping is allowed before authentication
+    test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+    interval: 5s
+    timeout: 5s
+    retries: 20
+    start_period: 20s
   ulimits:
     nproc: 64000
     nofile:
       soft: 64000
       hard: 64000
+  depends_on:
+    keyfile-init:
+      condition: service_completed_successfully
+
+# Generates the internal-auth keyfile once into a named volume (owner mongodb, mode 400)
+x-keyfile-init: &keyfile-init
+  image: mongo:9.0
+  user: root
+  restart: "no"
+  command:
+    - sh
+    - -c
+    - |
+      test -s /keys/mongo-keyfile || head -c 756 /dev/urandom | base64 | tr -d '\n' > /keys/mongo-keyfile
+      chown mongodb:mongodb /keys/mongo-keyfile
+      chmod 400 /keys/mongo-keyfile
 
 services:
-  ###########################################################################
-  # Config Server Replica Set (csrs)
-  ###########################################################################
+  keyfile-init:
+    <<: *keyfile-init
+    volumes: [mongo-keyfile:/keys]
+
   configsvr1:
-    <<: *mongo-shard-common
+    <<: *mongo-common
     container_name: configsvr1
     hostname: configsvr1
-    networks: [mongo-shard-net]
-    ports: ["27119:27017"]
+    ports: ["127.0.0.1:27119:27017"]
     volumes:
       - configsvr1-data:/data/db
-      - ./keyfile/mongo-keyfile:/etc/mongo-keyfile:ro
+      - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongod
-        --configsvr
-        --replSet csrs
-        --bind_ip_all
-        --auth
-        --keyFile /etc/mongo-keyfile
-        --wiredTigerCacheSizeGB 0.5
+      mongod --configsvr --replSet csrs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
+      --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
   configsvr2:
-    <<: *mongo-shard-common
+    <<: *mongo-common
     container_name: configsvr2
     hostname: configsvr2
-    networks: [mongo-shard-net]
-    ports: ["27120:27017"]
+    ports: ["127.0.0.1:27120:27017"]
     volumes:
       - configsvr2-data:/data/db
-      - ./keyfile/mongo-keyfile:/etc/mongo-keyfile:ro
+      - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongod
-        --configsvr
-        --replSet csrs
-        --bind_ip_all
-        --auth
-        --keyFile /etc/mongo-keyfile
-        --wiredTigerCacheSizeGB 0.5
+      mongod --configsvr --replSet csrs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
+      --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
   configsvr3:
-    <<: *mongo-shard-common
+    <<: *mongo-common
     container_name: configsvr3
     hostname: configsvr3
-    networks: [mongo-shard-net]
-    ports: ["27121:27017"]
+    ports: ["127.0.0.1:27121:27017"]
     volumes:
       - configsvr3-data:/data/db
-      - ./keyfile/mongo-keyfile:/etc/mongo-keyfile:ro
+      - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongod
-        --configsvr
-        --replSet csrs
-        --bind_ip_all
-        --auth
-        --keyFile /etc/mongo-keyfile
-        --wiredTigerCacheSizeGB 0.5
+      mongod --configsvr --replSet csrs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
+      --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
-  ###########################################################################
-  # Shard 1 Replica Set (shard1rs)
-  ###########################################################################
   shard1-node1:
-    <<: *mongo-shard-common
+    <<: *mongo-common
     container_name: shard1-node1
     hostname: shard1-node1
-    networks: [mongo-shard-net]
-    ports: ["27217:27017"]
+    ports: ["127.0.0.1:27301:27017"]
     volumes:
       - shard1-node1-data:/data/db
-      - ./keyfile/mongo-keyfile:/etc/mongo-keyfile:ro
+      - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongod
-        --shardsvr
-        --replSet shard1rs
-        --bind_ip_all
-        --auth
-        --keyFile /etc/mongo-keyfile
-        --wiredTigerCacheSizeGB 1
-        --oplogSize 512
+      mongod --shardsvr --replSet shard1rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
+      --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
   shard1-node2:
-    <<: *mongo-shard-common
+    <<: *mongo-common
     container_name: shard1-node2
     hostname: shard1-node2
-    networks: [mongo-shard-net]
-    ports: ["27218:27017"]
+    ports: ["127.0.0.1:27302:27017"]
     volumes:
       - shard1-node2-data:/data/db
-      - ./keyfile/mongo-keyfile:/etc/mongo-keyfile:ro
+      - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongod
-        --shardsvr
-        --replSet shard1rs
-        --bind_ip_all
-        --auth
-        --keyFile /etc/mongo-keyfile
-        --wiredTigerCacheSizeGB 1
-        --oplogSize 512
+      mongod --shardsvr --replSet shard1rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
+      --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
   shard1-node3:
-    <<: *mongo-shard-common
+    <<: *mongo-common
     container_name: shard1-node3
     hostname: shard1-node3
-    networks: [mongo-shard-net]
-    ports: ["27219:27017"]
+    ports: ["127.0.0.1:27303:27017"]
     volumes:
       - shard1-node3-data:/data/db
-      - ./keyfile/mongo-keyfile:/etc/mongo-keyfile:ro
+      - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongod
-        --shardsvr
-        --replSet shard1rs
-        --bind_ip_all
-        --auth
-        --keyFile /etc/mongo-keyfile
-        --wiredTigerCacheSizeGB 1
-        --oplogSize 512
+      mongod --shardsvr --replSet shard1rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
+      --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
-  ###########################################################################
-  # Shard 2 Replica Set (shard2rs)
-  ###########################################################################
   shard2-node1:
-    <<: *mongo-shard-common
+    <<: *mongo-common
     container_name: shard2-node1
     hostname: shard2-node1
-    networks: [mongo-shard-net]
-    ports: ["27317:27017"]
+    ports: ["127.0.0.1:27401:27017"]
     volumes:
       - shard2-node1-data:/data/db
-      - ./keyfile/mongo-keyfile:/etc/mongo-keyfile:ro
+      - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongod
-        --shardsvr
-        --replSet shard2rs
-        --bind_ip_all
-        --auth
-        --keyFile /etc/mongo-keyfile
-        --wiredTigerCacheSizeGB 1
-        --oplogSize 512
+      mongod --shardsvr --replSet shard2rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
+      --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
   shard2-node2:
-    <<: *mongo-shard-common
+    <<: *mongo-common
     container_name: shard2-node2
     hostname: shard2-node2
-    networks: [mongo-shard-net]
-    ports: ["27318:27017"]
+    ports: ["127.0.0.1:27402:27017"]
     volumes:
       - shard2-node2-data:/data/db
-      - ./keyfile/mongo-keyfile:/etc/mongo-keyfile:ro
+      - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongod
-        --shardsvr
-        --replSet shard2rs
-        --bind_ip_all
-        --auth
-        --keyFile /etc/mongo-keyfile
-        --wiredTigerCacheSizeGB 1
-        --oplogSize 512
+      mongod --shardsvr --replSet shard2rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
+      --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
   shard2-node3:
-    <<: *mongo-shard-common
+    <<: *mongo-common
     container_name: shard2-node3
     hostname: shard2-node3
-    networks: [mongo-shard-net]
-    ports: ["27319:27017"]
+    ports: ["127.0.0.1:27403:27017"]
     volumes:
       - shard2-node3-data:/data/db
-      - ./keyfile/mongo-keyfile:/etc/mongo-keyfile:ro
+      - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongod
-        --shardsvr
-        --replSet shard2rs
-        --bind_ip_all
-        --auth
-        --keyFile /etc/mongo-keyfile
-        --wiredTigerCacheSizeGB 1
-        --oplogSize 512
+      mongod --shardsvr --replSet shard2rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
+      --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
-  ###########################################################################
-  # mongos routers (stateless query routers)
-  ###########################################################################
+  # One-shot: initiate the three replica sets (retries until members answer)
+  shard-init-rs:
+    image: mongo:9.0
+    container_name: shard-init-rs
+    restart: "no"
+    depends_on:
+      configsvr1: {condition: service_healthy}
+      configsvr2: {condition: service_healthy}
+      configsvr3: {condition: service_healthy}
+      shard1-node1: {condition: service_healthy}
+      shard1-node2: {condition: service_healthy}
+      shard1-node3: {condition: service_healthy}
+      shard2-node1: {condition: service_healthy}
+      shard2-node2: {condition: service_healthy}
+      shard2-node3: {condition: service_healthy}
+    environment:
+      MONGO_ROOT_USER: ${MONGO_ROOT_USER:-admin}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-adminpassword}
+    volumes:
+      - ./scripts:/scripts:ro
+    entrypoint:
+      - sh
+      - -c
+      - |
+        init() {
+          until RS_ID="$$1" RS_HOSTS="$$3" RS_CONFIGSVR="$$4" mongosh --host "$$2" --quiet \
+                -u "$$MONGO_ROOT_USER" -p "$$MONGO_ROOT_PASSWORD" --authenticationDatabase admin \
+                --file /scripts/init-replica-set.js; do
+            echo "$$1 not ready, retrying"; sleep 3
+          done
+        }
+        init csrs configsvr1 configsvr1:27017,configsvr2:27017,configsvr3:27017 true
+        init shard1rs shard1-node1 shard1-node1:27017,shard1-node2:27017,shard1-node3:27017 false
+        init shard2rs shard2-node1 shard2-node1:27017,shard2-node2:27017,shard2-node3:27017 false
+
   mongos1:
-    image: mongo:7.0
+    image: mongo:9.0
     container_name: mongos1
     hostname: mongos1
     restart: unless-stopped
-    networks: [mongo-shard-net]
-    ports: ["27017:27017"]
+    ports: ["127.0.0.1:27017:27017"]
     volumes:
-      - ./keyfile/mongo-keyfile:/etc/mongo-keyfile:ro
+      - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongos
-        --configdb csrs/configsvr1:27017,configsvr2:27017,configsvr3:27017
-        --bind_ip_all
-        --keyFile /etc/mongo-keyfile
+      mongos --configdb csrs/configsvr1:27017,configsvr2:27017,configsvr3:27017
+      --bind_ip_all --keyFile /etc/mongo-keys/mongo-keyfile
     depends_on:
-      - configsvr1
-      - configsvr2
-      - configsvr3
+      shard-init-rs:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
 
   mongos2:
-    image: mongo:7.0
+    image: mongo:9.0
     container_name: mongos2
     hostname: mongos2
     restart: unless-stopped
-    networks: [mongo-shard-net]
-    ports: ["27018:27017"]
+    ports: ["127.0.0.1:27018:27017"]
     volumes:
-      - ./keyfile/mongo-keyfile:/etc/mongo-keyfile:ro
+      - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongos
-        --configdb csrs/configsvr1:27017,configsvr2:27017,configsvr3:27017
-        --bind_ip_all
-        --keyFile /etc/mongo-keyfile
+      mongos --configdb csrs/configsvr1:27017,configsvr2:27017,configsvr3:27017
+      --bind_ip_all --keyFile /etc/mongo-keys/mongo-keyfile
     depends_on:
-      - configsvr1
-      - configsvr2
-      - configsvr3
+      shard-init-rs:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
 
-  ###########################################################################
-  # Cluster initializer (one-shot)
-  ###########################################################################
-  mongo-shard-init:
-    image: mongo:7.0
-    container_name: mongo-shard-init
-    networks: [mongo-shard-net]
+  # One-shot: register the shards and shard appdb.events
+  shard-add:
+    image: mongo:9.0
+    container_name: shard-add
     restart: "no"
     depends_on:
-      - mongos1
-      - shard1-node1
-      - shard2-node1
+      mongos1: {condition: service_healthy}
+    environment:
+      MONGO_ROOT_USER: ${MONGO_ROOT_USER:-admin}
+      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-adminpassword}
+    volumes:
+      - ./scripts:/scripts:ro
     entrypoint:
-      - bash
+      - sh
       - -c
       - |
-        sleep 10
-        # Init config server replica set
-        mongosh --host configsvr1 --eval "
-          rs.initiate({
-            _id: 'csrs',
-            configsvr: true,
-            members: [
-              { _id: 0, host: 'configsvr1:27017' },
-              { _id: 1, host: 'configsvr2:27017' },
-              { _id: 2, host: 'configsvr3:27017' }
-            ]
-          })
-        "
-        sleep 5
-        # Init shard1 replica set
-        mongosh --host shard1-node1 --eval "
-          rs.initiate({
-            _id: 'shard1rs',
-            members: [
-              { _id: 0, host: 'shard1-node1:27017' },
-              { _id: 1, host: 'shard1-node2:27017' },
-              { _id: 2, host: 'shard1-node3:27017' }
-            ]
-          })
-        "
-        # Init shard2 replica set
-        mongosh --host shard2-node1 --eval "
-          rs.initiate({
-            _id: 'shard2rs',
-            members: [
-              { _id: 0, host: 'shard2-node1:27017' },
-              { _id: 1, host: 'shard2-node2:27017' },
-              { _id: 2, host: 'shard2-node3:27017' }
-            ]
-          })
-        "
-        sleep 10
-        # Add shards and create admin user via mongos
-        mongosh --host mongos1 --eval "
-          sh.addShard('shard1rs/shard1-node1:27017,shard1-node2:27017,shard1-node3:27017');
-          sh.addShard('shard2rs/shard2-node1:27017,shard2-node2:27017,shard2-node3:27017');
-          db.getSiblingDB('admin').createUser({
-            user: '${MONGO_ROOT_USER:-admin}',
-            pwd: '${MONGO_ROOT_PASSWORD:-adminpassword}',
-            roles: ['root']
-          });
-          sh.enableSharding('appdb');
-          sh.shardCollection('appdb.events', { userId: 'hashed' });
-          sh.status();
-        "
+        until mongosh --host mongos1 --quiet -u "$$MONGO_ROOT_USER" -p "$$MONGO_ROOT_PASSWORD" \
+              --authenticationDatabase admin --file /scripts/add-shards.js; do
+          echo "mongos not ready, retrying"; sleep 3
+        done
 
 volumes:
+  mongo-keyfile:
   configsvr1-data:
   configsvr2-data:
   configsvr3-data:
@@ -313,18 +264,3 @@ volumes:
   shard2-node1-data:
   shard2-node2-data:
   shard2-node3-data:
-
-networks:
-  mongo-shard-net:
-    driver: bridge
-
-# --- Generate keyfile ---
-# mkdir -p keyfile
-# openssl rand -base64 756 > keyfile/mongo-keyfile
-# chmod 400 keyfile/mongo-keyfile && chown 999:999 keyfile/mongo-keyfile
-#
-# --- Verify sharding ---
-# mongosh "mongodb://admin:adminpassword@localhost:27017/admin"
-# sh.status()
-# db.adminCommand({ listShards: 1 })
-# db.getSiblingDB('appdb').events.getShardDistribution()
