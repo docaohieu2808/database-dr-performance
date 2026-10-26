@@ -2,14 +2,13 @@ name: mongo-replica-set
 
 # MongoDB 9.0 replica set rs0: 3 data-bearing members with keyFile internal auth.
 # mongo1 has the highest priority (preferred primary); stop it and the others elect
-# a new primary. Election test: tests/mongo-replica-election.sh
+# a new primary. The root user is created by the init job over the localhost exception
+# (no MONGO_INITDB_* variables, which the image cannot combine with --keyFile cleanly).
+# Election test: tests/mongo-replica-election.sh
 
 x-mongo-common: &mongo-common
   image: mongo:9.0
   restart: unless-stopped
-  environment: &mongo-env
-    MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
-    MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-adminpassword}
   healthcheck:
     # ping is allowed before authentication
     test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
@@ -80,33 +79,28 @@ services:
       mongod --replSet rs0 --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
       --wiredTigerCacheSizeGB 0.25 --oplogSize 512 --slowms 100
 
-  # One-shot: initiate the replica set (retries until all members answer) and create appuser
   mongo-rs-init:
     image: mongo:9.0
     container_name: mongo-rs-init
     restart: "no"
-    networks: [default]
+    # Same network namespace as mongo1: connecting to localhost triggers the
+    # localhost exception, which is how the first user is created while auth is on.
+    network_mode: "service:mongo1"
     depends_on:
       mongo1: {condition: service_healthy}
       mongo2: {condition: service_healthy}
       mongo3: {condition: service_healthy}
     environment:
-      MONGO_ROOT_USER: ${MONGO_ROOT_USER:-admin}
-      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-adminpassword}
-      MONGO_APP_PASSWORD: ${MONGO_APP_PASSWORD:-apppassword}
       RS_ID: rs0
       RS_HOSTS: mongo1:27017,mongo2:27017,mongo3:27017
+      RS_CONFIGSVR: "false"
+      ROOT_USER: ${MONGO_ROOT_USER:-admin}
+      ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-adminpassword}
       APP_DB: appdb
+      APP_PASSWORD: ${MONGO_APP_PASSWORD:-apppassword}
     volumes:
       - ./scripts:/scripts:ro
-    entrypoint:
-      - sh
-      - -c
-      - |
-        until mongosh --host mongo1 --quiet -u "$$MONGO_ROOT_USER" -p "$$MONGO_ROOT_PASSWORD" \
-              --authenticationDatabase admin --file /scripts/init-replica-set.js; do
-          echo "replica set not ready, retrying"; sleep 3
-        done
+    entrypoint: ["mongosh", "--quiet", "--file", "/scripts/init-replica-set.js"]
 
 volumes:
   mongo-keyfile:

@@ -40,3 +40,5 @@ updates:
     directory: /mongodb
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: mongo-express   # tag scheme is irregular; pinned on purpose

@@ -6,7 +6,7 @@
 set -euo pipefail
 
 echo "[primary-init] Creating replication role: ${POSTGRES_REPLICATION_USER:-replicator}"
-psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER:-pguser}" <<-EOSQL
+psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER:-pguser}" --dbname "${POSTGRES_DB:-postgres}" <<-EOSQL
   DO \$\$
   BEGIN
     IF NOT EXISTS (

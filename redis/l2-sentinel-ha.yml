@@ -26,16 +26,17 @@ x-sentinel: &sentinel
   environment:
     REDIS_PASSWORD: ${REDIS_PASSWORD:-redispassword}   # sentinel itself has no password
   # Sentinel rewrites its own config file, so generate a writable copy on start.
-  # resolve-hostnames lets it monitor `redis-primary` by DNS name.
+  # Sentinel monitors the primary by IP (resolved once at start): a hostname that stops
+  # resolving after the container dies stalls Sentinel's event loop and trips TILT mode.
   command:
     - sh
     - -c
     - |
+      primary_ip=$$(getent hosts redis-primary | awk '{print $$1}')
       cat > /tmp/sentinel.conf <<EOF
       port 26379
       dir /tmp
-      sentinel resolve-hostnames yes
-      sentinel monitor mymaster redis-primary 6379 2
+      sentinel monitor mymaster $$primary_ip 6379 2
       sentinel auth-pass mymaster $$REDIS_PASSWORD
       sentinel down-after-milliseconds mymaster 5000
       sentinel failover-timeout mymaster 10000

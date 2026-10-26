@@ -8,7 +8,7 @@ source "$TESTS/lib.sh"
 
 C=(docker compose -f l1-basic-docker-compose.yml)
 IMAGE="${REDIS_IMAGE:-redis:8.10-alpine}"
-cleanup() { [[ $? -eq 0 ]] || "${C[@]}" logs --no-color --tail 80 || true; "${C[@]}" down -v --remove-orphans >/dev/null 2>&1 || true; docker rm -f redis-acl >/dev/null 2>&1 || true; }
+cleanup() { [[ $? -eq 0 ]] || "${C[@]}" logs --no-color --tail 80 || true; "${C[@]}" down -v --remove-orphans >/dev/null 2>&1 || true; docker logs --tail 40 redis-acl 2>&1 || true; docker rm -f redis-acl >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 log "l1: start with password and AOF/RDB persistence"

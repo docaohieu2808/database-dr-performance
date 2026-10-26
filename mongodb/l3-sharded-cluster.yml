@@ -4,15 +4,13 @@ name: mongo-sharded
 # sets (3 each) and two mongos routers = 11 mongod/mongos processes + init jobs.
 # Needs about 3 GB RAM. Smoke test: tests/mongo-sharded-smoke.sh
 #
-# Start order: keyfile -> all mongod -> shard-init-rs (rs.initiate x3) -> mongos ->
-# shard-add (addShard + shardCollection appdb.events on hashed userId)
+# Start order: keyfile -> all mongod -> init-csrs / init-shard1 / init-shard2
+# (rs.initiate + root user over the localhost exception) -> mongos -> shard-add
+# (addShard + shardCollection appdb.events on hashed userId)
 
 x-mongo-common: &mongo-common
   image: mongo:9.0
   restart: unless-stopped
-  environment: &mongo-env
-    MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-admin}
-    MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-adminpassword}
   healthcheck:
     # ping is allowed before authentication
     test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
@@ -155,40 +153,68 @@ services:
       mongod --shardsvr --replSet shard2rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
       --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
-  # One-shot: initiate the three replica sets (retries until members answer)
-  shard-init-rs:
+  init-csrs:
     image: mongo:9.0
-    container_name: shard-init-rs
+    container_name: init-csrs
     restart: "no"
+    # Same network namespace as configsvr1: connecting to localhost triggers the
+    # localhost exception, which is how the first user is created while auth is on.
+    network_mode: "service:configsvr1"
     depends_on:
       configsvr1: {condition: service_healthy}
       configsvr2: {condition: service_healthy}
       configsvr3: {condition: service_healthy}
+    environment:
+      RS_ID: csrs
+      RS_HOSTS: configsvr1:27017,configsvr2:27017,configsvr3:27017
+      RS_CONFIGSVR: "true"
+      ROOT_USER: ${MONGO_ROOT_USER:-admin}
+      ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-adminpassword}
+    volumes:
+      - ./scripts:/scripts:ro
+    entrypoint: ["mongosh", "--quiet", "--file", "/scripts/init-replica-set.js"]
+
+  init-shard1:
+    image: mongo:9.0
+    container_name: init-shard1
+    restart: "no"
+    # Same network namespace as shard1-node1: connecting to localhost triggers the
+    # localhost exception, which is how the first user is created while auth is on.
+    network_mode: "service:shard1-node1"
+    depends_on:
       shard1-node1: {condition: service_healthy}
       shard1-node2: {condition: service_healthy}
       shard1-node3: {condition: service_healthy}
+    environment:
+      RS_ID: shard1rs
+      RS_HOSTS: shard1-node1:27017,shard1-node2:27017,shard1-node3:27017
+      RS_CONFIGSVR: "false"
+      ROOT_USER: ${MONGO_ROOT_USER:-admin}
+      ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-adminpassword}
+    volumes:
+      - ./scripts:/scripts:ro
+    entrypoint: ["mongosh", "--quiet", "--file", "/scripts/init-replica-set.js"]
+
+  init-shard2:
+    image: mongo:9.0
+    container_name: init-shard2
+    restart: "no"
+    # Same network namespace as shard2-node1: connecting to localhost triggers the
+    # localhost exception, which is how the first user is created while auth is on.
+    network_mode: "service:shard2-node1"
+    depends_on:
       shard2-node1: {condition: service_healthy}
       shard2-node2: {condition: service_healthy}
       shard2-node3: {condition: service_healthy}
     environment:
-      MONGO_ROOT_USER: ${MONGO_ROOT_USER:-admin}
-      MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-adminpassword}
+      RS_ID: shard2rs
+      RS_HOSTS: shard2-node1:27017,shard2-node2:27017,shard2-node3:27017
+      RS_CONFIGSVR: "false"
+      ROOT_USER: ${MONGO_ROOT_USER:-admin}
+      ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-adminpassword}
     volumes:
       - ./scripts:/scripts:ro
-    entrypoint:
-      - sh
-      - -c
-      - |
-        init() {
-          until RS_ID="$$1" RS_HOSTS="$$3" RS_CONFIGSVR="$$4" mongosh --host "$$2" --quiet \
-                -u "$$MONGO_ROOT_USER" -p "$$MONGO_ROOT_PASSWORD" --authenticationDatabase admin \
-                --file /scripts/init-replica-set.js; do
-            echo "$$1 not ready, retrying"; sleep 3
-          done
-        }
-        init csrs configsvr1 configsvr1:27017,configsvr2:27017,configsvr3:27017 true
-        init shard1rs shard1-node1 shard1-node1:27017,shard1-node2:27017,shard1-node3:27017 false
-        init shard2rs shard2-node1 shard2-node1:27017,shard2-node2:27017,shard2-node3:27017 false
+    entrypoint: ["mongosh", "--quiet", "--file", "/scripts/init-replica-set.js"]
 
   mongos1:
     image: mongo:9.0
@@ -202,7 +228,7 @@ services:
       mongos --configdb csrs/configsvr1:27017,configsvr2:27017,configsvr3:27017
       --bind_ip_all --keyFile /etc/mongo-keys/mongo-keyfile
     depends_on:
-      shard-init-rs:
+      init-csrs:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
@@ -223,7 +249,7 @@ services:
       mongos --configdb csrs/configsvr1:27017,configsvr2:27017,configsvr3:27017
       --bind_ip_all --keyFile /etc/mongo-keys/mongo-keyfile
     depends_on:
-      shard-init-rs:
+      init-csrs:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
@@ -232,13 +258,16 @@ services:
       retries: 20
       start_period: 10s
 
-  # One-shot: register the shards and shard appdb.events
+  # One-shot: register the shards and shard appdb.events (runs next to mongos1, authenticated)
   shard-add:
     image: mongo:9.0
     container_name: shard-add
     restart: "no"
+    network_mode: "service:mongos1"
     depends_on:
       mongos1: {condition: service_healthy}
+      init-shard1: {condition: service_completed_successfully}
+      init-shard2: {condition: service_completed_successfully}
     environment:
       MONGO_ROOT_USER: ${MONGO_ROOT_USER:-admin}
       MONGO_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-adminpassword}
@@ -247,11 +276,7 @@ services:
     entrypoint:
       - sh
       - -c
-      - |
-        until mongosh --host mongos1 --quiet -u "$$MONGO_ROOT_USER" -p "$$MONGO_ROOT_PASSWORD" \
-              --authenticationDatabase admin --file /scripts/add-shards.js; do
-          echo "mongos not ready, retrying"; sleep 3
-        done
+      - exec mongosh --quiet -u "$$MONGO_ROOT_USER" -p "$$MONGO_ROOT_PASSWORD" --authenticationDatabase admin --file /scripts/add-shards.js
 
 volumes:
   mongo-keyfile:

@@ -46,7 +46,7 @@ jobs:
           ./actionlint -color
 
       - name: shellcheck
-        run: shellcheck -x -P SCRIPTDIR $(git ls-files '*.sh')
+        run: git ls-files -z '*.sh' | xargs -0 shellcheck -x -P SCRIPTDIR
 
       - name: yamllint
         run: yamllint --strict -c .yamllint.yml .
@@ -157,9 +157,11 @@ jobs:
       - name: patroni --validate-config
         working-directory: postgresql
         run: |
-          docker compose -f l3-patroni-ha-cluster.yml build patroni1
+          # the validator resolves the DCS host, so etcd has to be up
+          docker compose -f l3-patroni-ha-cluster.yml up -d --build --wait etcd
           docker compose -f l3-patroni-ha-cluster.yml run --rm --no-deps --entrypoint patroni patroni1 \
             --validate-config /etc/patroni/patroni.yml
+          docker compose -f l3-patroni-ha-cluster.yml down -v
       - run: tests/patroni-failover.sh
 
   postgres-pitr:

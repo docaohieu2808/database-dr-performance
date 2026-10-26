@@ -22,6 +22,7 @@ assert_eq 3 "$(cinfo redis-node-1 | awk -F: '/cluster_size/{print $2}')" "3 prim
 for i in $(seq 1 60); do docker exec redis-node-1 redis-cli -c set "key:$i" "value-$i" >/dev/null; done
 assert_eq 60 "$(for i in $(seq 1 60); do docker exec redis-node-1 redis-cli -c get "key:$i"; done | grep -c value-)" "60 keys readable across shards"
 
+sleep 3   # replication is asynchronous: let the replicas catch up before the primary dies
 # Stop a primary: node 1 is a primary after a fresh create with replicas 1
 role_of() { docker exec "$1" redis-cli info replication | tr -d '\r' | awk -F: '/^role:/{print $2}'; }
 assert_eq master "$(role_of redis-node-1)" "redis-node-1 is a primary"
