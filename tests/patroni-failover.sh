@@ -36,6 +36,9 @@ old_leader="$(leader_of patroni1)"
 [[ -n "$old_leader" ]] || fail "no leader found"
 log "initial leader: $old_leader"
 
+# HAProxy needs a few health-check rounds before it routes to the new leader
+haproxy_ready() { sql patroni1 "SELECT 1" >/dev/null 2>&1; }
+retry 60 "HAProxy routes to the primary" haproxy_ready
 sql patroni1 "CREATE TABLE IF NOT EXISTS ha_test (id serial PRIMARY KEY, note text)" >/dev/null
 sql patroni1 "INSERT INTO ha_test (note) SELECT 'before-failover-' || g FROM generate_series(1,1000) g" >/dev/null
 before="$(sql patroni1 "SELECT count(*) FROM ha_test")"

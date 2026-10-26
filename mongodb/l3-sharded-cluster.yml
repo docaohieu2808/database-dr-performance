@@ -4,6 +4,8 @@ name: mongo-sharded
 # sets (3 each) and two mongos routers = 11 mongod/mongos processes + init jobs.
 # Needs about 3 GB RAM. Smoke test: tests/mongo-sharded-smoke.sh
 #
+# --configsvr / --shardsvr change the default port (27019 / 27018), so --port 27017 is explicit.
+#
 # Start order: keyfile -> all mongod -> init-csrs / init-shard1 / init-shard2
 # (rs.initiate + root user over the localhost exception) -> mongos -> shard-add
 # (addShard + shardCollection appdb.events on hashed userId)
@@ -55,7 +57,7 @@ services:
       - configsvr1-data:/data/db
       - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongod --configsvr --replSet csrs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
+      mongod --configsvr --port 27017 --replSet csrs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
       --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
   configsvr2:
@@ -67,7 +69,7 @@ services:
       - configsvr2-data:/data/db
       - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongod --configsvr --replSet csrs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
+      mongod --configsvr --port 27017 --replSet csrs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
       --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
   configsvr3:
@@ -79,7 +81,7 @@ services:
       - configsvr3-data:/data/db
       - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongod --configsvr --replSet csrs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
+      mongod --configsvr --port 27017 --replSet csrs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
       --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
   shard1-node1:
@@ -91,7 +93,7 @@ services:
       - shard1-node1-data:/data/db
       - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongod --shardsvr --replSet shard1rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
+      mongod --shardsvr --port 27017 --replSet shard1rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
       --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
   shard1-node2:
@@ -103,7 +105,7 @@ services:
       - shard1-node2-data:/data/db
       - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongod --shardsvr --replSet shard1rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
+      mongod --shardsvr --port 27017 --replSet shard1rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
       --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
   shard1-node3:
@@ -115,7 +117,7 @@ services:
       - shard1-node3-data:/data/db
       - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongod --shardsvr --replSet shard1rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
+      mongod --shardsvr --port 27017 --replSet shard1rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
       --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
   shard2-node1:
@@ -127,7 +129,7 @@ services:
       - shard2-node1-data:/data/db
       - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongod --shardsvr --replSet shard2rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
+      mongod --shardsvr --port 27017 --replSet shard2rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
       --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
   shard2-node2:
@@ -139,7 +141,7 @@ services:
       - shard2-node2-data:/data/db
       - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongod --shardsvr --replSet shard2rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
+      mongod --shardsvr --port 27017 --replSet shard2rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
       --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
   shard2-node3:
@@ -151,7 +153,7 @@ services:
       - shard2-node3-data:/data/db
       - mongo-keyfile:/etc/mongo-keys:ro
     command: >
-      mongod --shardsvr --replSet shard2rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
+      mongod --shardsvr --port 27017 --replSet shard2rs --bind_ip_all --auth --keyFile /etc/mongo-keys/mongo-keyfile
       --wiredTigerCacheSizeGB 0.25 --oplogSize 256
 
   init-csrs:

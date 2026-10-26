@@ -26,12 +26,14 @@ sleep 3   # replication is asynchronous: let the replicas catch up before the pr
 # Stop a primary: node 1 is a primary after a fresh create with replicas 1
 role_of() { docker exec "$1" redis-cli info replication | tr -d '\r' | awk -F: '/^role:/{print $2}'; }
 assert_eq master "$(role_of redis-node-1)" "redis-node-1 is a primary"
-log "stopping redis-node-1 hard"
+old_id="$(docker exec redis-node-1 redis-cli cluster myid)"
+log "stopping redis-node-1 hard ($old_id)"
 docker stop -t 0 redis-node-1 >/dev/null
 
 # healed = cluster_state ok AND three primaries without the "fail" flag own slots (the stopped
 # primary is still listed, flagged fail, until the replica that replaced it is promoted)
 healed() {
+  docker exec redis-node-2 redis-cli cluster nodes | awk -v id="$old_id" '$1 == id && $3 ~ /fail/' | grep -q . || return 1
   [[ "$(cinfo redis-node-2 2>/dev/null | awk -F: '/cluster_state/{print $2}')" == ok ]] || return 1
   [[ "$(docker exec redis-node-2 redis-cli cluster nodes | awk '$3 ~ /master/ && $3 !~ /fail/ && NF >= 9' | wc -l)" == 3 ]]
 }

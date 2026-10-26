@@ -64,7 +64,7 @@ services:
     user: postgres
     entrypoint: ["/bin/sh", "/docker-entrypoint-replica.sh"]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pguser} -d ${POSTGRES_DB:-appdb}"]
       interval: 5s
       timeout: 5s
       retries: 20

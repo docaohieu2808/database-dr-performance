@@ -3,5 +3,7 @@
 # every security update.
 ignored:
   - DL3008
+  - DL3018
   - DL3066
+# DL3018: same reasoning for the Alpine package of PgBouncer.
 # DL3066: the base images create `postgres` / `pgbouncer`; a name is clearer than a UID here.
